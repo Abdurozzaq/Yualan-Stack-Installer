@@ -157,6 +157,21 @@
         opacity: 0.7;
       }
       
+      /* Error states */
+      input.error {
+        border-color: var(--error);
+        background: rgba(239, 68, 68, 0.05);
+        box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
+      }
+      
+      .error-message {
+        color: var(--error);
+        font-size: 11px;
+        font-weight: 500;
+        margin-top: 4px;
+        display: block;
+      }
+      
       button { 
         padding: 10px 16px; 
         border-radius: 8px; 
@@ -548,12 +563,13 @@
           <div class="form-group-header">Custom Payloads</div>
           <div class="form-group-content">
             <div class="field">
-              <label>App Zip</label>
+              <label>Application Package</label>
               <div class="row">
-                <input id="appZip" placeholder="payloads/app/app.zip" readonly />
-                <button id="pickApp">Pick</button>
+                <input id="appZip" placeholder="Select application package..." readonly />
+                <button id="pickApp">Pick App</button>
               </div>
-              <small>Leave empty to use bundled payloads</small>
+              <small id="appZipError" class="error-message" style="display: none;">Please select an application package before installing</small>
+              <small>Choose your Laravel application package to install</small>
             </div>
             <div class="field">
               <label>PostgreSQL Zip</label>
@@ -607,7 +623,7 @@
         </div>
         <div class="actions" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #e0e0e0;">
           <button id="toggleAdvanced" class="secondary" style="font-size: 11px;">Show Advanced</button>
-          <button id="togglePayloads" class="secondary" style="font-size: 11px;">Custom Payloads</button>
+          <button id="togglePayloads" class="secondary" style="font-size: 11px;">App Package</button>
         </div>
       </div>
       <div class="content">
@@ -658,8 +674,20 @@
 
         // Install App button
         installBtn.disabled = !isServerSetup || isAppInstalled;
-        installBtn.title = !isServerSetup ? 'Setup server first' : 
-                          isAppInstalled ? 'App already installed' : 'Install Laravel application';
+        const customPayloadsVisible = document.getElementById('customPayloads').style.display !== 'none';
+        const hasAppPackage = document.getElementById('appZip').value.trim() !== '';
+        
+        if (!isServerSetup) {
+          installBtn.title = 'Setup server first';
+        } else if (isAppInstalled) {
+          installBtn.title = 'App already installed';
+        } else if (customPayloadsVisible && !hasAppPackage) {
+          installBtn.title = 'Please select an application package first';
+          installBtn.disabled = true;
+        } else {
+          installBtn.title = 'Install Laravel application';
+        }
+        
         installBtn.querySelector('.status-indicator').className = 
           `status-indicator ${!isServerSetup ? 'status-pending' : isAppInstalled ? 'status-success' : 'status-pending'}`;
 
@@ -782,9 +810,21 @@
       document.getElementById('togglePayloads').addEventListener('click', () => {
         const payloads = document.getElementById('customPayloads');
         const btn = document.getElementById('togglePayloads');
+        const appZipInput = document.getElementById('appZip');
+        const appZipError = document.getElementById('appZipError');
         const isVisible = payloads.style.display !== 'none';
+        
         payloads.style.display = isVisible ? 'none' : 'block';
-        btn.textContent = isVisible ? 'Custom Payloads' : 'Hide Payloads';
+        btn.textContent = isVisible ? 'App Package' : 'Hide Package';
+        
+        // Clear error state when hiding the section
+        if (isVisible) {
+          appZipInput.classList.remove('error');
+          appZipError.style.display = 'none';
+        }
+        
+        // Update UI state to refresh button states
+        updateUIState();
       });
 
       window.api.onInstallerEvent((evt) => {
@@ -872,6 +912,27 @@
         const installDir = document.getElementById('installDir').value.trim();
         if (!installDir) { append('❌ Please choose an install folder.'); return; }
         
+        // Validate app zip is selected if custom payloads are visible
+        const customPayloads = document.getElementById('customPayloads');
+        const appZipInput = document.getElementById('appZip');
+        const appZipError = document.getElementById('appZipError');
+        
+        // Clear previous error state
+        appZipInput.classList.remove('error');
+        appZipError.style.display = 'none';
+        
+        // Check if custom payloads section is visible and app zip is required
+        const isCustomPayloadsVisible = customPayloads.style.display !== 'none';
+        const appZipValue = appZipInput.value.trim();
+        
+        if (isCustomPayloadsVisible && !appZipValue) {
+          // Show error if custom payloads are visible but no app package selected
+          appZipInput.classList.add('error');
+          appZipError.style.display = 'block';
+          append('❌ Please select an application package to install.');
+          return;
+        }
+        
         const btn = document.getElementById('installApp');
         btn.disabled = true;
         btn.querySelector('.status-indicator').className = 'status-indicator status-running';
@@ -889,7 +950,7 @@
           pgDatabase: document.getElementById('pgDb').value,
           pgUser: document.getElementById('pgUser').value,
           pgPassword: document.getElementById('pgPass').value,
-          appZip: document.getElementById('appZip').value,
+          appZip: appZipValue, // Use the validated value
           logChannel: document.getElementById('logChannel').value,
           logDeprecationsChannel: document.getElementById('logDepCh').value,
           logLevel: document.getElementById('logLevel').value,
@@ -1005,7 +1066,20 @@
       document.getElementById('pickPg').addEventListener('click', async () => { const f = await chooseFile(); if (f) document.getElementById('pgZip').value = f; });
       document.getElementById('pickPhp').addEventListener('click', async () => { const f = await chooseFile(); if (f) document.getElementById('phpZip').value = f; });
       document.getElementById('pickNode').addEventListener('click', async () => { const f = await chooseFile(); if (f) document.getElementById('nodeZip').value = f; });
-      document.getElementById('pickApp').addEventListener('click', async () => { const f = await chooseFile(); if (f) document.getElementById('appZip').value = f; });
+      document.getElementById('pickApp').addEventListener('click', async () => { 
+        const f = await chooseFile(); 
+        if (f) {
+          const appZipInput = document.getElementById('appZip');
+          const appZipError = document.getElementById('appZipError');
+          
+          // Clear error state when file is selected
+          appZipInput.classList.remove('error');
+          appZipError.style.display = 'none';
+          appZipInput.value = f;
+          
+          append('📦 Application package selected: ' + f);
+        }
+      });
 
       // Initialize UI state
       updateUIState();

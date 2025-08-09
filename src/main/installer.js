@@ -17,8 +17,39 @@ let processes = {
   queue: null,
 };
 
-const payloadBase = path.resolve(__dirname, '../../payloads');
-const templatesBase = path.resolve(__dirname, '../../templates');
+// Handle both development and portable/ASAR scenarios
+function getResourcePath(relativePath) {
+  if (process.env.NODE_ENV === 'development' || !process.resourcesPath) {
+    // Development mode - use relative paths from __dirname
+    return path.resolve(__dirname, relativePath);
+  } else {
+    // Portable/packaged mode - use app.asar.unpacked or resources path
+    const resourcesPath = process.resourcesPath;
+    const unpackedPath = path.join(resourcesPath, 'app.asar.unpacked', relativePath.replace(/^\.\.\/\.\.\//, ''));
+    const asarPath = path.join(resourcesPath, 'app', relativePath.replace(/^\.\.\/\.\.\//, ''));
+    const regularPath = path.join(resourcesPath, relativePath.replace(/^\.\.\/\.\.\//, ''));
+    
+    // Try unpacked first, then regular resources path
+    if (fs.existsSync(unpackedPath)) return unpackedPath;
+    if (fs.existsSync(regularPath)) return regularPath;
+    if (fs.existsSync(asarPath)) return asarPath;
+    
+    // Fallback to original logic
+    return path.resolve(__dirname, relativePath);
+  }
+}
+
+const payloadBase = getResourcePath('../../payloads');
+const templatesBase = getResourcePath('../../templates');
+
+// Debug logging for portable mode
+console.log('[Installer Debug] __dirname:', __dirname);
+console.log('[Installer Debug] process.resourcesPath:', process.resourcesPath);
+console.log('[Installer Debug] NODE_ENV:', process.env.NODE_ENV);
+console.log('[Installer Debug] payloadBase:', payloadBase);
+console.log('[Installer Debug] templatesBase:', templatesBase);
+console.log('[Installer Debug] payloadBase exists:', fs.existsSync(payloadBase));
+console.log('[Installer Debug] templatesBase exists:', fs.existsSync(templatesBase));
 
 function emit(progress, evt) {
   if (typeof progress === 'function') progress(evt);
@@ -69,8 +100,21 @@ async function findBinary(baseDir, candidates, maxDepth = 4) {
 }
 
 async function ensureZipExtract(zipPath, targetDir) {
-  await fse.ensureDir(targetDir);
-  await extract(zipPath, { dir: targetDir });
+  try {
+    console.log(`[Extract Debug] zipPath: ${zipPath}`);
+    console.log(`[Extract Debug] targetDir: ${targetDir}`);
+    console.log(`[Extract Debug] zipPath exists: ${fs.existsSync(zipPath)}`);
+    console.log(`[Extract Debug] targetDir parent exists: ${fs.existsSync(path.dirname(targetDir))}`);
+    
+    await fse.ensureDir(targetDir);
+    console.log(`[Extract Debug] ensureDir completed for: ${targetDir}`);
+    
+    await extract(zipPath, { dir: targetDir });
+    console.log(`[Extract Debug] extraction completed`);
+  } catch (error) {
+    console.error(`[Extract Error] Failed to extract ${zipPath} to ${targetDir}:`, error);
+    throw new Error(`Extract failed: ${error.message}`);
+  }
 }
 
 async function downloadIfMissing(url, destDir, fileName, progress) {
@@ -101,7 +145,7 @@ async function setupServer(options, progress) {
 
   // 1) Lay down payloads (server components only)
   const defaultUrls = {
-    php: 'https://windows.php.net/downloads/releases/php-8.2.21-Win32-vs16-x64.zip',
+    php: 'https://windows.php.net/downloads/releases/php-8.2.29-Win32-vs16-x64.zip',
     node: 'https://nodejs.org/dist/v20.12.2/node-v20.12.2-win-x64.zip',
     postgres: 'https://get.enterprisedb.com/postgresql/postgresql-15.2-1-windows-x64-binaries.zip',
   };
@@ -292,32 +336,143 @@ async function resolveRoots({ phpDir, apacheDir, nodeDir, pgDir }) {
   return roots;
 }
 
-// Detect the actual Laravel app root inside appDir, accounting for a single nested wrapper directory
-async function resolveAppRoot(appDir, maxDepth = 3) {
-  let current = appDir;
-  for (let i = 0; i <= maxDepth; i++) {
+// Detect the actual Laravel app root inside appDir, accounting for nested wrapper directories
+async function resolveAppRoot(appDir, maxDepth = 5) {
+  console.log(`[ResolveAppRoot Debug] Starting with appDir: ${appDir}`);
+  console.log(`[ResolveAppRoot Debug] appDir exists: ${fs.existsSync(appDir)}`);
+  
+  // Try multiple strategies to find the Laravel root
+  const strategies = [
+    () => findLaravelRootByArtisan(appDir, maxDepth),
+    () => findLaravelRootByComposer(appDir, maxDepth), 
+    () => findLaravelRootByStructure(appDir, maxDepth),
+    () => appDir // fallback to original directory
+  ];
+  
+  for (const strategy of strategies) {
     try {
-      const entries = await fse.readdir(current, { withFileTypes: true });
-      // If this folder has artisan, assume it's the root
-      if (entries.some(e => e.isFile() && e.name.toLowerCase() === 'artisan')) return current;
-      const dirs = entries.filter(e => e.isDirectory() && !e.name.startsWith('.') && e.name.toLowerCase() !== '__macosx');
-      const files = entries.filter(e => e.isFile());
-      // Drill down if exactly one subdirectory and no obvious app files here
-      if (dirs.length === 1 && !files.some(f => ['artisan', 'composer.json', 'package.json'].includes(f.name.toLowerCase()))) {
-        current = path.join(current, dirs[0].name);
-        continue;
+      const result = await strategy();
+      if (result && result !== appDir) {
+        console.log(`[ResolveAppRoot Debug] Strategy found Laravel root: ${result}`);
+        
+        // Validate the found directory has Laravel characteristics
+        const hasLaravelFiles = await validateLaravelDirectory(result);
+        if (hasLaravelFiles) {
+          return result;
+        }
       }
-      break;
-    } catch (_) {
-      break;
+    } catch (error) {
+      console.log(`[ResolveAppRoot Debug] Strategy failed: ${error.message}`);
     }
   }
-  // Fallback: search for artisan within limited depth
-  try {
-    const artisanPath = await findBinary(appDir, ['artisan'], maxDepth);
-    if (artisanPath) return path.dirname(artisanPath);
-  } catch (_) {}
+  
+  console.log(`[ResolveAppRoot Debug] Using fallback appDir: ${appDir}`);
   return appDir;
+}
+
+// Find Laravel root by looking for artisan file
+async function findLaravelRootByArtisan(baseDir, maxDepth) {
+  try {
+    const artisanPath = await findBinary(baseDir, ['artisan'], maxDepth);
+    if (artisanPath) {
+      console.log(`[ResolveAppRoot Debug] Found artisan at: ${artisanPath}`);
+      return path.dirname(artisanPath);
+    }
+  } catch (error) {
+    console.log(`[ResolveAppRoot Debug] Artisan search failed: ${error.message}`);
+  }
+  return null;
+}
+
+// Find Laravel root by looking for composer.json with Laravel dependencies
+async function findLaravelRootByComposer(baseDir, maxDepth) {
+  const walk = async (dir, depth) => {
+    if (depth > maxDepth) return null;
+    
+    try {
+      const entries = await fse.readdir(dir, { withFileTypes: true });
+      
+      // Check for composer.json in current directory
+      const composerFile = path.join(dir, 'composer.json');
+      if (await fse.pathExists(composerFile)) {
+        try {
+          const composer = await fse.readJson(composerFile);
+          if (composer?.require?.['laravel/framework'] || 
+              composer?.require?.['illuminate/support'] ||
+              (composer?.name && composer.name.includes('laravel'))) {
+            console.log(`[ResolveAppRoot Debug] Found Laravel composer.json at: ${dir}`);
+            return dir;
+          }
+        } catch (e) {
+          console.log(`[ResolveAppRoot Debug] Invalid composer.json at: ${composerFile}`);
+        }
+      }
+      
+      // Recurse into subdirectories
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name.toLowerCase() !== '__macosx') {
+          const result = await walk(path.join(dir, entry.name), depth + 1);
+          if (result) return result;
+        }
+      }
+    } catch (error) {
+      console.log(`[ResolveAppRoot Debug] Error walking ${dir}: ${error.message}`);
+    }
+    return null;
+  };
+  
+  return await walk(baseDir, 0);
+}
+
+// Find Laravel root by looking for typical Laravel directory structure
+async function findLaravelRootByStructure(baseDir, maxDepth) {
+  const walk = async (dir, depth) => {
+    if (depth > maxDepth) return null;
+    
+    try {
+      const entries = await fse.readdir(dir, { withFileTypes: true });
+      const dirs = entries.filter(e => e.isDirectory()).map(e => e.name.toLowerCase());
+      const files = entries.filter(e => e.isFile()).map(e => e.name.toLowerCase());
+      
+      // Look for typical Laravel structure
+      const hasLaravelDirs = ['app', 'config', 'database', 'routes'].every(d => dirs.includes(d));
+      const hasLaravelFiles = files.includes('artisan') || files.includes('composer.json');
+      
+      if (hasLaravelDirs && hasLaravelFiles) {
+        console.log(`[ResolveAppRoot Debug] Found Laravel structure at: ${dir}`);
+        return dir;
+      }
+      
+      // Recurse into subdirectories
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name.toLowerCase() !== '__macosx') {
+          const result = await walk(path.join(dir, entry.name), depth + 1);
+          if (result) return result;
+        }
+      }
+    } catch (error) {
+      console.log(`[ResolveAppRoot Debug] Error checking structure in ${dir}: ${error.message}`);
+    }
+    return null;
+  };
+  
+  return await walk(baseDir, 0);
+}
+
+// Validate that a directory has Laravel characteristics
+async function validateLaravelDirectory(dir) {
+  try {
+    const hasArtisan = await fse.pathExists(path.join(dir, 'artisan'));
+    const hasComposerJson = await fse.pathExists(path.join(dir, 'composer.json'));
+    const hasAppDir = await fse.pathExists(path.join(dir, 'app'));
+    const hasConfigDir = await fse.pathExists(path.join(dir, 'config'));
+    
+    // Require at least artisan OR composer.json + typical Laravel structure
+    return hasArtisan || (hasComposerJson && hasAppDir && hasConfigDir);
+  } catch (error) {
+    console.log(`[ResolveAppRoot Debug] Validation error for ${dir}: ${error.message}`);
+    return false;
+  }
 }
 
 function makeEnvFromRoots(baseEnv, roots) {
@@ -1067,12 +1222,25 @@ async function start(progress, options = {}) { return startServices(progress, op
 async function installApp(options = {}, progress) {
   const installDir = options.installDir;
   if (!installDir) throw new Error('installDir is required');
+  
+  console.log(`[InstallApp Debug] installDir: ${installDir}`);
+  console.log(`[InstallApp Debug] installDir exists: ${fs.existsSync(installDir)}`);
+  
   const appDir = path.join(installDir, 'app');
   const stackDir = path.join(installDir, 'stack');
   const phpDir = path.join(stackDir, 'php');
   const nodeDir = path.join(stackDir, 'node');
 
-  await fse.ensureDir(appDir);
+  console.log(`[InstallApp Debug] appDir: ${appDir}`);
+  console.log(`[InstallApp Debug] stackDir: ${stackDir}`);
+  
+  try {
+    await fse.ensureDir(appDir);
+    console.log(`[InstallApp Debug] appDir ensured successfully`);
+  } catch (error) {
+    console.error(`[InstallApp Error] Failed to ensure appDir:`, error);
+    throw new Error(`Failed to create app directory: ${error.message}`);
+  }
   const version = options.appVersion || options.version || null;
   const targetDir = version ? path.join(appDir, 'versions', String(version)) : appDir;
   await fse.ensureDir(targetDir);
@@ -1109,13 +1277,74 @@ async function installApp(options = {}, progress) {
   }
 
   const appRoot = await resolveAppRoot(targetDir);
-  // Validate extracted app contents
+  console.log(`[InstallApp Debug] Resolved appRoot: ${appRoot}`);
+  
+  // Enhanced validation of extracted app contents with better error handling
   const hasArtisan = await fse.pathExists(path.join(appRoot, 'artisan')).catch(() => false);
   const hasComposerJson = await fse.pathExists(path.join(appRoot, 'composer.json')).catch(() => false);
-  if (!hasArtisan && !hasComposerJson) {
-    emit(progress, { stage: 'error', message: `Application not found in ${appRoot}. Ensure your zip contains a Laravel project (artisan/composer.json).` });
-    throw new Error('Invalid application archive');
+  const hasAppDir = await fse.pathExists(path.join(appRoot, 'app')).catch(() => false);
+  const hasConfigDir = await fse.pathExists(path.join(appRoot, 'config')).catch(() => false);
+  
+  console.log(`[InstallApp Debug] Validation results:`);
+  console.log(`[InstallApp Debug] - hasArtisan: ${hasArtisan}`);
+  console.log(`[InstallApp Debug] - hasComposerJson: ${hasComposerJson}`);
+  console.log(`[InstallApp Debug] - hasAppDir: ${hasAppDir}`);
+  console.log(`[InstallApp Debug] - hasConfigDir: ${hasConfigDir}`);
+  
+  // More flexible validation - allow Laravel project even if some files are missing
+  const isValidLaravelApp = hasArtisan || (hasComposerJson && (hasAppDir || hasConfigDir));
+  
+  if (!isValidLaravelApp) {
+    // Try to find Laravel in subdirectories one more time before failing
+    emit(progress, { stage: 'extract', message: 'Laravel project structure not found in root, searching subdirectories...' });
+    
+    const subdirs = await fse.readdir(appRoot, { withFileTypes: true })
+      .then(entries => entries.filter(e => e.isDirectory() && !e.name.startsWith('.')))
+      .catch(() => []);
+    
+    let foundLaravelIn = null;
+    for (const subdir of subdirs) {
+      const subdirPath = path.join(appRoot, subdir.name);
+      const subdirHasArtisan = await fse.pathExists(path.join(subdirPath, 'artisan')).catch(() => false);
+      const subdirHasComposer = await fse.pathExists(path.join(subdirPath, 'composer.json')).catch(() => false);
+      
+      if (subdirHasArtisan || subdirHasComposer) {
+        foundLaravelIn = subdirPath;
+        console.log(`[InstallApp Debug] Found Laravel in subdirectory: ${foundLaravelIn}`);
+        break;
+      }
+    }
+    
+    if (foundLaravelIn) {
+      // Update appRoot to the subdirectory containing Laravel
+      const newAppRoot = foundLaravelIn;
+      emit(progress, { stage: 'extract', message: `Laravel found in subdirectory: ${path.basename(newAppRoot)}` });
+      
+      // Move Laravel files to the parent directory
+      try {
+        const tempDir = path.join(targetDir, '_temp_laravel');
+        await fse.move(newAppRoot, tempDir);
+        await fse.emptyDir(targetDir);
+        await fse.move(tempDir, targetDir);
+        
+        emit(progress, { stage: 'extract', message: 'Laravel files moved to app root' });
+      } catch (moveError) {
+        console.error(`[InstallApp Error] Failed to move Laravel files: ${moveError.message}`);
+        emit(progress, { stage: 'error', message: `Failed to reorganize Laravel files: ${moveError.message}` });
+        throw new Error('Failed to reorganize Laravel application structure');
+      }
+    } else {
+      emit(progress, { stage: 'error', message: `Laravel application not found in ${appRoot}. Ensure your zip contains a Laravel project with artisan file or composer.json.` });
+      throw new Error('Invalid Laravel application archive - no Laravel structure found');
+    }
+  } else {
+    emit(progress, { stage: 'extract', message: 'Laravel application structure validated successfully' });
   }
+
+  // Force regenerate appRoot after potential directory restructuring
+  const finalAppRoot = await resolveAppRoot(targetDir);
+  console.log(`[InstallApp Debug] Final appRoot: ${finalAppRoot}`);
+
   // Ensure a valid Laravel APP_KEY
   const providedKey = options.appKey || '';
   const isValidLaravelKey = (key) => {
@@ -1132,7 +1361,7 @@ async function installApp(options = {}, progress) {
   const finalAppKey = isValidLaravelKey(providedKey) ? providedKey : generatedKey;
   
   // Check and update ports before creating .env
-  const { webPort, pgPort } = await checkAndUpdatePorts(options, appRoot, progress);
+  const { webPort, pgPort } = await checkAndUpdatePorts(options, finalAppRoot, progress);
   
   const envData = {
     APP_NAME: options.appName || 'Yualan App',
@@ -1158,12 +1387,18 @@ async function installApp(options = {}, progress) {
   const envTpl = path.join(templatesBase, 'env', 'laravel.env.hbs');
   if (await fse.pathExists(envTpl)) {
     const envOut = renderTemplate(envTpl, envData);
-    await fse.writeFile(path.join(appRoot, '.env'), envOut, 'utf8');
+    await fse.writeFile(path.join(finalAppRoot, '.env'), envOut, 'utf8');
+    emit(progress, { stage: 'env', message: '.env file created successfully' });
+  } else {
+    emit(progress, { stage: 'env', message: 'Laravel .env template not found, using manual creation' });
+    // Manually create .env if template doesn't exist
+    const envContent = Object.entries(envData).map(([key, value]) => `${key}=${value}`).join('\n');
+    await fse.writeFile(path.join(finalAppRoot, '.env'), envContent, 'utf8');
   }
-  await ensureEnvSafety(appRoot);
+  await ensureEnvSafety(finalAppRoot);
   // If .env exists with an invalid or missing APP_KEY, fix it now
   try {
-    const envFile = path.join(appRoot, '.env');
+    const envFile = path.join(finalAppRoot, '.env');
     if (await fse.pathExists(envFile)) {
       let txt = await fse.readFile(envFile, 'utf8');
       const m = txt.match(/^APP_KEY=(.*)$/m);
@@ -1174,12 +1409,21 @@ async function installApp(options = {}, progress) {
         if (m) txt = txt.replace(/^APP_KEY=.*$/m, `APP_KEY=${newKey}`);
         else txt += (txt.endsWith('\n') ? '' : '\n') + `APP_KEY=${newKey}\n`;
         await fse.writeFile(envFile, txt, 'utf8');
+        emit(progress, { stage: 'env', message: 'APP_KEY updated in .env file' });
       }
     }
-  } catch (_) {}
+  } catch (_) {
+    console.log('[InstallApp Debug] Failed to fix APP_KEY in .env file');
+  }
 
   // Start a temporary PostgreSQL for installation (so migrations can run), then stop it at the end
   const roots = await resolveRoots({ phpDir, apacheDir: path.join(stackDir, 'apache'), nodeDir, pgDir: path.join(stackDir, 'postgres') });
+  console.log(`[InstallApp Debug] Resolved roots:`, {
+    phpRoot: roots.phpRoot,
+    nodeRoot: roots.nodeRoot,
+    pgRoot: roots.pgRoot,
+    apacheRoot: roots.apacheRoot
+  });
   const env = makeEnvFromRoots(process.env, roots);
   let startedPg = false;
   let pgCtlPath = null;
@@ -1216,20 +1460,110 @@ async function installApp(options = {}, progress) {
     emit(progress, { stage: 'warn', message: `Skipping temporary Postgres start for install: ${e.message}` });
   }
 
-  // Composer and npm with enhanced fallback strategies
+  // Enhanced Composer and npm installation with better error handling
   const phpExe = await findBinary(roots.phpRoot || phpDir, ['php.exe', 'php']);
   const composerPhar = path.join(roots.phpRoot || phpDir, 'composer.phar');
-  if (phpExe && await fse.pathExists(composerPhar)) {
-    emit(progress, { stage: 'composer', message: 'Running composer install...' });
-    await runCommand(phpExe, [composerPhar, 'install', '--no-ansi', '--no-interaction'], { cwd: appRoot, env, progress, stage: 'composer', logPrefix: 'composer install' });
+  
+  console.log(`[InstallApp Debug] PHP search details:`);
+  console.log(`[InstallApp Debug] - roots.phpRoot: ${roots.phpRoot}`);
+  console.log(`[InstallApp Debug] - phpDir: ${phpDir}`);
+  console.log(`[InstallApp Debug] - Search path: ${roots.phpRoot || phpDir}`);
+  console.log(`[InstallApp Debug] - phpDir exists: ${await fse.pathExists(phpDir).catch(() => false)}`);
+  if (roots.phpRoot) {
+    console.log(`[InstallApp Debug] - phpRoot exists: ${await fse.pathExists(roots.phpRoot).catch(() => false)}`);
   }
-  // Ensure app key is generated
-  if (phpExe) {
+  console.log(`[InstallApp Debug] PHP exe: ${phpExe}`);
+  console.log(`[InstallApp Debug] Composer phar: ${composerPhar}`);
+  console.log(`[InstallApp Debug] PHP exe exists: ${phpExe && await fse.pathExists(phpExe).catch(() => false)}`);
+  console.log(`[InstallApp Debug] Composer phar exists: ${await fse.pathExists(composerPhar).catch(() => false)}`);
+  
+  // Re-validate composer.json exists in final location
+  const finalComposerJson = path.join(finalAppRoot, 'composer.json');
+  const hasComposerJsonFinal = await fse.pathExists(finalComposerJson).catch(() => false);
+  console.log(`[InstallApp Debug] Final composer.json exists: ${hasComposerJsonFinal}`);
+  
+  if (phpExe && await fse.pathExists(composerPhar).catch(() => false) && hasComposerJsonFinal) {
+    emit(progress, { stage: 'composer', message: 'Running composer install...' });
+    console.log(`[InstallApp Debug] Running composer install in: ${finalAppRoot}`);
+    
+    try {
+      const composerResult = await runCommand(phpExe, [composerPhar, 'install', '--no-ansi', '--no-interaction', '--optimize-autoloader'], { 
+        cwd: finalAppRoot, 
+        env, 
+        progress, 
+        stage: 'composer', 
+        logPrefix: 'composer install',
+        timeoutMs: 300000 // 5 minutes timeout
+      });
+      
+      if (composerResult.code !== 0) {
+        emit(progress, { stage: 'composer', message: `Composer install failed with code ${composerResult.code}, trying with --no-dev...` });
+        
+        // Retry with --no-dev flag
+        const retryResult = await runCommand(phpExe, [composerPhar, 'install', '--no-ansi', '--no-interaction', '--no-dev'], { 
+          cwd: finalAppRoot, 
+          env, 
+          progress, 
+          stage: 'composer', 
+          logPrefix: 'composer install (no-dev)',
+          timeoutMs: 300000
+        });
+        
+        if (retryResult.code !== 0) {
+          emit(progress, { stage: 'composer', message: `Composer install failed. This may affect the application but installation will continue.` });
+        } else {
+          emit(progress, { stage: 'composer', message: 'Composer install completed (production dependencies only)' });
+        }
+      } else {
+        emit(progress, { stage: 'composer', message: 'Composer install completed successfully' });
+      }
+    } catch (error) {
+      console.error(`[InstallApp Error] Composer install error: ${error.message}`);
+      emit(progress, { stage: 'composer', message: `Composer install error: ${error.message}` });
+    }
+  } else {
+    let missingComponents = [];
+    if (!phpExe) missingComponents.push('PHP executable');
+    if (!(await fse.pathExists(composerPhar).catch(() => false))) missingComponents.push('composer.phar');
+    if (!hasComposerJsonFinal) missingComponents.push('composer.json');
+    
+    emit(progress, { stage: 'composer', message: `Skipping composer install - missing: ${missingComponents.join(', ')}` });
+    console.log(`[InstallApp Debug] Skipping composer - missing: ${missingComponents.join(', ')}`);
+  }
+  
+  // Ensure app key is generated with better error handling
+  const finalArtisan = path.join(finalAppRoot, 'artisan');
+  if (phpExe && await fse.pathExists(finalArtisan).catch(() => false)) {
     emit(progress, { stage: 'laravel', message: 'Generating APP_KEY (php artisan key:generate)...' });
-    await runCommand(phpExe, [path.join(appRoot, 'artisan'), 'key:generate', '--force'], { cwd: appRoot, env, progress, stage: 'laravel', logPrefix: 'artisan key:generate' });
+    console.log(`[InstallApp Debug] Running artisan key:generate in: ${finalAppRoot}`);
+    
+    try {
+      const keyGenResult = await runCommand(phpExe, [finalArtisan, 'key:generate', '--force'], { 
+        cwd: finalAppRoot, 
+        env, 
+        progress, 
+        stage: 'laravel', 
+        logPrefix: 'artisan key:generate',
+        timeoutMs: 30000
+      });
+      
+      if (keyGenResult.code !== 0) {
+        emit(progress, { stage: 'laravel', message: 'Artisan key:generate failed, but continuing installation...' });
+      } else {
+        emit(progress, { stage: 'laravel', message: 'APP_KEY generated successfully' });
+      }
+    } catch (error) {
+      console.error(`[InstallApp Error] Key generation error: ${error.message}`);
+      emit(progress, { stage: 'laravel', message: `Key generation error: ${error.message}` });
+    }
+  } else {
+    emit(progress, { stage: 'laravel', message: 'Skipping key generation - PHP or artisan not available' });
+    console.log(`[InstallApp Debug] Skipping key generation - PHP: ${!!phpExe}, Artisan: ${await fse.pathExists(finalArtisan).catch(() => false)}`);
   }
   try {
-    const hasPkg = await fse.pathExists(path.join(appRoot, 'package.json'));
+    const hasPkg = await fse.pathExists(path.join(finalAppRoot, 'package.json'));
+    console.log(`[InstallApp Debug] Has package.json: ${hasPkg}`);
+    
     if (hasPkg) {
       emit(progress, { stage: 'npm', message: 'Preparing npm environment...' });
       
@@ -1245,55 +1579,113 @@ async function installApp(options = {}, progress) {
                           [...packageManager.prefix, 'install', '--no-audit', '--no-fund'];
         
         emit(progress, { stage: 'npm', message: 'Installing npm packages...' });
+        console.log(`[InstallApp Debug] Running npm install in: ${finalAppRoot}`);
+        
         const installResult = await runCommand(packageManager.cmd, installCmd, { 
-          cwd: appRoot, 
+          cwd: finalAppRoot, 
           env: packageManager.strategy === 'bundled' ? 
                 { ...env, PATH: (roots.nodeRoot || nodeDir) + path.delimiter + env.PATH } : env, 
-          progress, stage: 'npm', logPrefix: `${packageManager.strategy} install` 
+          progress, stage: 'npm', logPrefix: `${packageManager.strategy} install`,
+          timeoutMs: 300000 // 5 minutes timeout
         });
         
         if (installResult.code !== 0) {
           emit(progress, { stage: 'npm', message: `Package install failed with ${packageManager.strategy}, exit code: ${installResult.code}` });
+        } else {
+          emit(progress, { stage: 'npm', message: 'npm packages installed successfully' });
         }
         
         // Build frontend if build script exists
         try {
-          const pkg = JSON.parse(await fse.readFile(path.join(appRoot, 'package.json'), 'utf8'));
+          const pkg = JSON.parse(await fse.readFile(path.join(finalAppRoot, 'package.json'), 'utf8'));
           if (pkg?.scripts?.build) {
             emit(progress, { stage: 'npm', message: `Building frontend (${packageManager.strategy} run build)...` });
+            console.log(`[InstallApp Debug] Running npm build in: ${finalAppRoot}`);
             
             const buildCmd = packageManager.strategy === 'yarn' ? ['build'] : 
                             packageManager.strategy === 'pnpm' ? ['run', 'build'] :
                             [...packageManager.prefix, 'run', 'build'];
             
             const buildResult = await runCommand(packageManager.cmd, buildCmd, { 
-              cwd: appRoot, 
+              cwd: finalAppRoot, 
               env: packageManager.strategy === 'bundled' ? 
                     { ...env, PATH: (roots.nodeRoot || nodeDir) + path.delimiter + env.PATH } : env,
-              progress, stage: 'npm', logPrefix: `${packageManager.strategy} run build` 
+              progress, stage: 'npm', logPrefix: `${packageManager.strategy} run build`,
+              timeoutMs: 300000 // 5 minutes timeout
             });
             
             if (buildResult.code !== 0) {
               emit(progress, { stage: 'npm', message: `Build failed with ${packageManager.strategy}, exit code: ${buildResult.code}` });
+            } else {
+              emit(progress, { stage: 'npm', message: 'Frontend build completed successfully' });
             }
+          } else {
+            emit(progress, { stage: 'npm', message: 'No build script found in package.json' });
           }
         } catch (e) {
           emit(progress, { stage: 'npm', message: `Build step failed: ${e.message}` });
         }
       } else {
         emit(progress, { stage: 'npm', message: 'No working package manager found. Skipping npm operations.' });
+        console.log(`[InstallApp Debug] No package manager available`);
       }
     }
   } catch (e) {
     emit(progress, { stage: 'npm', message: `npm operations failed: ${e.message}` });
+    console.error(`[InstallApp Error] npm operations error: ${e.message}`);
   }
 
-  // Migrate/seed
-  if (phpExe) {
+  // Migrate/seed with better error handling
+  if (phpExe && await fse.pathExists(finalArtisan).catch(() => false)) {
     emit(progress, { stage: 'laravel', message: 'Running database migrations...' });
-    await runCommand(phpExe, [path.join(appRoot, 'artisan'), 'migrate', '--force'], { cwd: appRoot, env, progress, stage: 'laravel', logPrefix: 'artisan migrate' });
+    console.log(`[InstallApp Debug] Running migrations in: ${finalAppRoot}`);
+    
+    try {
+      const migrateResult = await runCommand(phpExe, [finalArtisan, 'migrate', '--force'], { 
+        cwd: finalAppRoot, 
+        env, 
+        progress, 
+        stage: 'laravel', 
+        logPrefix: 'artisan migrate',
+        timeoutMs: 120000 // 2 minutes timeout
+      });
+      
+      if (migrateResult.code !== 0) {
+        emit(progress, { stage: 'laravel', message: 'Database migration failed but installation will continue' });
+      } else {
+        emit(progress, { stage: 'laravel', message: 'Database migrations completed successfully' });
+      }
+    } catch (error) {
+      console.error(`[InstallApp Error] Migration error: ${error.message}`);
+      emit(progress, { stage: 'laravel', message: `Migration error: ${error.message}` });
+    }
+    
+    // Run seeding
     emit(progress, { stage: 'laravel', message: 'Seeding database...' });
-    await runCommand(phpExe, [path.join(appRoot, 'artisan'), 'db:seed', '--force'], { cwd: appRoot, env, progress, stage: 'laravel', logPrefix: 'artisan db:seed' });
+    console.log(`[InstallApp Debug] Running database seeding in: ${finalAppRoot}`);
+    
+    try {
+      const seedResult = await runCommand(phpExe, [finalArtisan, 'db:seed', '--force'], { 
+        cwd: finalAppRoot, 
+        env, 
+        progress, 
+        stage: 'laravel', 
+        logPrefix: 'artisan db:seed',
+        timeoutMs: 120000 // 2 minutes timeout
+      });
+      
+      if (seedResult.code !== 0) {
+        emit(progress, { stage: 'laravel', message: 'Database seeding failed (this may be normal if no seeders exist)' });
+      } else {
+        emit(progress, { stage: 'laravel', message: 'Database seeding completed successfully' });
+      }
+    } catch (error) {
+      console.error(`[InstallApp Error] Seeding error: ${error.message}`);
+      emit(progress, { stage: 'laravel', message: `Seeding error: ${error.message}` });
+    }
+  } else {
+    emit(progress, { stage: 'laravel', message: 'Skipping migrations and seeding - PHP or artisan not available' });
+    console.log(`[InstallApp Debug] Skipping migrations - PHP: ${!!phpExe}, Artisan: ${await fse.pathExists(finalArtisan).catch(() => false)}`);
   }
 
   // If versioned, mark current

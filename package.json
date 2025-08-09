@@ -35,9 +35,14 @@
       "src/**/*",
       "assets/**/*",
       "payloads/**/*",
+      "templates/**/*",
       "!**/*.map"
     ],
     "asar": true,
+    "asarUnpack": [
+      "payloads/**/*",
+      "templates/**/*"
+    ],
     "directories": {
       "buildResources": "build"
     },

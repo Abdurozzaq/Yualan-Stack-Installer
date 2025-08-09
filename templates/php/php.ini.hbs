@@ -1,0 +1,36 @@
+[PHP]
+engine = On
+short_open_tag = Off
+precision = 14
+output_buffering = 4096
+implicit_flush = Off
+serialize_precision = -1
+disable_functions =
+disable_classes =
+expose_php = On
+
+max_execution_time = 60
+memory_limit = 512M
+error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
+display_errors = Off
+log_errors = On
+
+; Ensure PHP finds extensions
+extension_dir = "{{phpExtDir}}"
+
+; Common extensions needed for Laravel/Composer
+extension=curl
+extension=fileinfo
+extension=mbstring
+extension=openssl
+extension=zip
+extension=pgsql
+extension=pdo_pgsql
+; extension=intl
+
+allow_url_fopen = On
+date.timezone = UTC
+
+[openssl]
+openssl.cafile =
+openssl.capath =

@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Yualan Stack Installer</title>
+    <style>
+      :root { 
+        color-scheme: light dark; 
+        /* Modern Blue & Black Color Palette */
+        --primary-blue: #2563eb;
+        --primary-blue-hover: #1d4ed8;
+        --primary-blue-light: #3b82f6;
+        --secondary-blue: #60a5fa;
+        --accent-blue: #dbeafe;
+        --dark-bg: #0f172a;
+        --dark-surface: #1e293b;
+        --dark-border: #334155;
+        --light-bg: #ffffff;
+        --light-surface: #f8fafc;
+        --light-border: #e2e8f0;
+        --text-primary: #0f172a;
+        --text-secondary: #64748b;
+        --text-muted: #94a3b8;
+        --success: #10b981;
+        --warning: #f59e0b;
+        --error: #ef4444;
+        --info: #3b82f6;
+      }
+      
+      * { box-sizing: border-box; }
+      body { 
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Inter', sans-serif; 
+        margin: 0; 
+        width: 800px; 
+        height: 600px; 
+        overflow: hidden; 
+        display: flex; 
+        flex-direction: column;
+        background: var(--light-bg);
+        color: var(--text-primary);
+        line-height: 1.5;
+      }
+      
+      header { 
+        padding: 16px 20px; 
+        background: linear-gradient(135deg, var(--primary-blue) 0%, var(--primary-blue-light) 100%);
+        color: white;
+        display: flex; 
+        align-items: center; 
+        gap: 12px; 
+        flex-shrink: 0;
+        box-shadow: 0 2px 8px rgba(37, 99, 235, 0.15);
+      }
+      
+      h1 { 
+        font-size: 18px; 
+        margin: 0; 
+        font-weight: 600;
+        letter-spacing: -0.025em;
+      }
+      
+      main { 
+        display: grid; 
+        grid-template-columns: 340px 1fr; 
+        flex: 1; 
+        overflow: hidden; 
+        background: var(--light-surface);
+      }
+      
+      .sidebar { 
+        border-right: 1px solid var(--light-border); 
+        padding: 20px; 
+        overflow-y: auto; 
+        background: var(--light-bg);
+      }
+      
+      .content { 
+        padding: 20px; 
+        overflow: hidden; 
+        display: flex; 
+        flex-direction: column; 
+        background: var(--light-surface);
+      }
+      
+      /* Form Groups */
+      .form-group {
+        margin-bottom: 20px;
+        border: 1px solid var(--light-border);
+        border-radius: 12px;
+        background: var(--light-bg);
+        overflow: hidden;
+        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+        transition: all 0.2s ease;
+      }
+      
+      .form-group:hover {
+        border-color: var(--secondary-blue);
+        box-shadow: 0 4px 12px rgba(37, 99, 235, 0.08);
+      }
+      
+      .form-group-header {
+        background: linear-gradient(135deg, var(--light-surface) 0%, #f1f5f9 100%);
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--light-border);
+        font-weight: 600;
+        font-size: 14px;
+        color: var(--text-primary);
+        letter-spacing: -0.025em;
+      }
+      
+      .form-group-content {
+        padding: 16px;
+      }
+      
+      .field { 
+        margin-bottom: 12px; 
+      }
+      .field:last-child { 
+        margin-bottom: 0; 
+      }
+      
+      label { 
+        display: block; 
+        font-size: 12px; 
+        color: var(--text-secondary); 
+        margin-bottom: 6px; 
+        font-weight: 500;
+        letter-spacing: 0.025em;
+        text-transform: uppercase;
+      }
+      
+      input, select { 
+        width: 100%; 
+        padding: 10px 12px; 
+        border-radius: 8px; 
+        border: 1px solid var(--light-border); 
+        background: var(--light-bg); 
+        color: var(--text-primary); 
+        font-size: 14px;
+        transition: all 0.2s ease;
+        font-family: inherit;
+      }
+      
+      input:focus, select:focus {
+        outline: none;
+        border-color: var(--primary-blue);
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        background: var(--light-bg);
+      }
+      
+      input:disabled, select:disabled {
+        background: var(--light-surface);
+        color: var(--text-muted);
+        cursor: not-allowed;
+        opacity: 0.7;
+      }
+      
+      button { 
+        padding: 10px 16px; 
+        border-radius: 8px; 
+        border: 1px solid var(--primary-blue); 
+        background: var(--primary-blue); 
+        color: white; 
+        cursor: pointer; 
+        font-size: 13px;
+        font-weight: 600;
+        font-family: inherit;
+        transition: all 0.2s ease;
+        letter-spacing: -0.025em;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      
+      button:hover:not(:disabled) { 
+        background: var(--primary-blue-hover); 
+        border-color: var(--primary-blue-hover);
+        box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2);
+        transform: translateY(-1px);
+      }
+      
+      button:disabled {
+        background: var(--text-muted);
+        border-color: var(--text-muted);
+        cursor: not-allowed;
+        opacity: 0.6;
+        transform: none;
+        box-shadow: none;
+      }
+      
+      button.secondary { 
+        background: var(--light-bg); 
+        color: var(--primary-blue); 
+        border-color: var(--light-border);
+      }
+      
+      button.secondary:hover:not(:disabled) { 
+        background: var(--accent-blue); 
+        border-color: var(--primary-blue);
+        color: var(--primary-blue-hover);
+      }
+      
+      button.secondary:disabled {
+        background: var(--light-surface);
+        color: var(--text-muted);
+        border-color: var(--light-border);
+      }
+      
+      button.danger {
+        background: var(--error);
+        color: white;
+        border-color: var(--error);
+      }
+      
+      button.danger:hover:not(:disabled) {
+        background: #dc2626;
+        border-color: #dc2626;
+        box-shadow: 0 4px 12px rgba(239, 68, 68, 0.2);
+        transform: translateY(-1px);
+      }
+      
+      .actions { 
+        display: flex; 
+        gap: 8px; 
+        margin-top: 16px; 
+        flex-wrap: wrap;
+      }
+      
+      .row { 
+        display: flex; 
+        gap: 8px; 
+        align-items: center; 
+      }
+      .row input { 
+        flex: 1; 
+      }
+      .row button { 
+        flex-shrink: 0; 
+        padding: 10px 14px;
+      }
+      
+      /* Activity Log */
+      .log-container {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      
+      .log-header {
+        font-size: 16px;
+        font-weight: 600;
+        margin-bottom: 12px;
+        color: var(--text-primary);
+        letter-spacing: -0.025em;
+      }
+      
+      pre { 
+        background: var(--dark-bg); 
+        color: #e2e8f0;
+        padding: 16px; 
+        border-radius: 12px; 
+        overflow: auto; 
+        font-size: 12px;
+        line-height: 1.6;
+        flex: 1;
+        margin: 0;
+        border: 1px solid var(--dark-border);
+        font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+        box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+      
+      /* Status Indicators */
+      .status-indicator {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 8px;
+        animation: pulse 2s infinite;
+      }
+      
+      .status-pending { 
+        background: var(--text-muted);
+        animation: none;
+      }
+      .status-running { 
+        background: var(--info);
+      }
+      .status-success { 
+        background: var(--success);
+        animation: none;
+      }
+      .status-error { 
+        background: var(--error);
+        animation: none;
+      }
+      
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+      }
+      
+      /* Progress Steps */
+      .progress-steps {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 24px;
+        padding: 0 12px;
+        position: relative;
+      }
+      
+      .progress-steps::before {
+        content: '';
+        position: absolute;
+        top: 12px;
+        left: 20%;
+        right: 20%;
+        height: 2px;
+        background: var(--light-border);
+        z-index: 1;
+      }
+      
+      .step {
+        flex: 1;
+        text-align: center;
+        position: relative;
+        font-size: 11px;
+        color: var(--text-muted);
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        z-index: 2;
+        background: var(--light-bg);
+        padding: 0 8px;
+      }
+      
+      .step.active {
+        color: var(--primary-blue);
+        font-weight: 600;
+      }
+      
+      .step.completed {
+        color: var(--success);
+        font-weight: 600;
+      }
+      
+      small { 
+        font-size: 11px; 
+        color: var(--text-muted); 
+        display: block; 
+        margin-top: 4px; 
+        font-style: italic;
+      }
+      
+      /* Scrollbar Styling */
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      
+      ::-webkit-scrollbar-track {
+        background: var(--light-surface);
+        border-radius: 3px;
+      }
+      
+      ::-webkit-scrollbar-thumb {
+        background: var(--text-muted);
+        border-radius: 3px;
+      }
+      
+      ::-webkit-scrollbar-thumb:hover {
+        background: var(--text-secondary);
+      }
+      
+      /* Enhanced Typography */
+      .form-group-header {
+        position: relative;
+      }
+      
+      .form-group-header::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 3px;
+        background: linear-gradient(180deg, var(--primary-blue) 0%, var(--secondary-blue) 100%);
+        border-radius: 0 2px 2px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Yualan Stack Installer</h1>
+    </header>
+    <main>
+      <div class="sidebar">
+        <!-- Progress Steps -->
+        <div class="progress-steps">
+          <div class="step" id="step-1">Setup</div>
+          <div class="step" id="step-2">Install</div>
+          <div class="step" id="step-3">Start</div>
+          <div class="step" id="step-4">Ready</div>
+        </div>
+
+        <!-- Installation Path -->
+        <div class="form-group">
+          <div class="form-group-header">Installation Path</div>
+          <div class="form-group-content">
+            <div class="field">
+              <label>Install Folder</label>
+              <div class="row">
+                <input id="installDir" placeholder="Choose folder..." readonly />
+                <button id="browse">Browse</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Application Settings -->
+        <div class="form-group">
+          <div class="form-group-header">Application Settings</div>
+          <div class="form-group-content">
+            <div class="field">
+              <label>App Name</label>
+              <input id="appName" value="Yualan App"/>
+            </div>
+            <div class="field">
+              <label>App Environment</label>
+              <select id="appEnv">
+                <option value="local" selected>local</option>
+                <option value="development">development</option>
+                <option value="production">production</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Debug Mode</label>
+              <select id="appDebug">
+                <option value="true" selected>Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>App Key (optional)</label>
+              <input id="appKey" placeholder="auto-generate if empty"/>
+              <small>Leave empty to auto-generate</small>
+            </div>
+          </div>
+        </div>
+
+        <!-- Network Settings -->
+        <div class="form-group">
+          <div class="form-group-header">Network Configuration</div>
+          <div class="form-group-content">
+            <div class="field">
+              <label>Web Port</label>
+              <input id="webPort" value="8080" type="number" min="1000" max="65535"/>
+            </div>
+            <div class="field">
+              <label>Database Port</label>
+              <input id="pgPort" value="5432" type="number" min="1000" max="65535"/>
+            </div>
+            <div class="field">
+              <label>Database Host</label>
+              <input id="dbHost" value="127.0.0.1"/>
+            </div>
+          </div>
+        </div>
+
+        <!-- Database Settings -->
+        <div class="form-group">
+          <div class="form-group-header">Database Configuration</div>
+          <div class="form-group-content">
+            <div class="field">
+              <label>DB Connection</label>
+              <select id="dbConn">
+                <option value="pgsql" selected>PostgreSQL</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Database Name</label>
+              <input id="pgDb" value="yualan"/>
+            </div>
+            <div class="field">
+              <label>Database User</label>
+              <input id="pgUser" value="yualan"/>
+            </div>
+            <div class="field">
+              <label>Database Password</label>
+              <input id="pgPass" value="yualan" type="password"/>
+            </div>
+          </div>
+        </div>
+
+        <!-- Advanced Settings (Collapsible) -->
+        <div class="form-group" style="display: none;" id="advancedSettings">
+          <div class="form-group-header">Advanced Settings</div>
+          <div class="form-group-content">
+            <div class="field">
+              <label>Log Channel</label>
+              <input id="logChannel" value="stack"/>
+            </div>
+            <div class="field">
+              <label>Log Level</label>
+              <select id="logLevel">
+                <option value="debug" selected>Debug</option>
+                <option value="info">Info</option>
+                <option value="warning">Warning</option>
+                <option value="error">Error</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Session Driver</label>
+              <select id="sessionDriver">
+                <option value="file" selected>File</option>
+                <option value="database">Database</option>
+                <option value="redis">Redis</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Session Lifetime (minutes)</label>
+              <input id="sessionLifetime" value="120" type="number"/>
+            </div>
+            <div class="field" style="display: none;">
+              <label>Log Deprecations Channel</label>
+              <input id="logDepCh" value="null"/>
+            </div>
+            <div class="field" style="display: none;">
+              <label>Broadcast Driver</label>
+              <input id="broadcastDriver" value="log"/>
+            </div>
+            <div class="field" style="display: none;">
+              <label>Filesystem Disk</label>
+              <input id="fsDisk" value="local"/>
+            </div>
+            <div class="field" style="display: none;">
+              <label>Queue Connection</label>
+              <input id="queueConn" value="sync"/>
+            </div>
+          </div>
+        </div>
+
+        <!-- Custom Payloads (Hidden by default) -->
+        <div class="form-group" style="display: none;" id="customPayloads">
+          <div class="form-group-header">Custom Payloads</div>
+          <div class="form-group-content">
+            <div class="field">
+              <label>App Zip</label>
+              <div class="row">
+                <input id="appZip" placeholder="payloads/app/app.zip" readonly />
+                <button id="pickApp">Pick</button>
+              </div>
+              <small>Leave empty to use bundled payloads</small>
+            </div>
+            <div class="field">
+              <label>PostgreSQL Zip</label>
+              <div class="row">
+                <input id="pgZip" placeholder="payloads/postgres/postgres.zip" readonly />
+                <button id="pickPg">Pick</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>PHP Zip</label>
+              <div class="row">
+                <input id="phpZip" placeholder="payloads/php/php.zip" readonly />
+                <button id="pickPhp">Pick</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>Node.js Zip</label>
+              <div class="row">
+                <input id="nodeZip" placeholder="payloads/node/node.zip" readonly />
+                <button id="pickNode">Pick</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="actions">
+          <button id="setupServer" class="primary" disabled title="Choose install folder first">
+            <span class="status-indicator status-pending"></span>
+            Setup Server
+          </button>
+        </div>
+        <div class="actions">
+          <button id="installApp" class="secondary" disabled title="Setup server first">
+            <span class="status-indicator status-pending"></span>
+            Install App
+          </button>
+          <button id="startServices" class="secondary" disabled title="Install app first">
+            <span class="status-indicator status-pending"></span>
+            Start Services
+          </button>
+        </div>
+        <div class="actions">
+          <button id="stop" class="secondary" disabled>Stop Services</button>
+          <button id="open" class="secondary" disabled>Open App</button>
+        </div>
+        <div class="actions">
+          <button id="cleanupPorts" class="danger">
+            🧹 Cleanup Ports
+          </button>
+        </div>
+        <div class="actions" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #e0e0e0;">
+          <button id="toggleAdvanced" class="secondary" style="font-size: 11px;">Show Advanced</button>
+          <button id="togglePayloads" class="secondary" style="font-size: 11px;">Custom Payloads</button>
+        </div>
+      </div>
+      <div class="content">
+        <div class="log-container">
+          <div class="log-header">Installation Progress</div>
+          <pre id="log">Ready to start installation. Please choose an install folder.</pre>
+        </div>
+      </div>
+    </main>
+    <script>
+      const logEl = document.getElementById('log');
+      const append = (msg) => { 
+        logEl.textContent += new Date().toLocaleTimeString() + ' - ' + msg + "\n"; 
+        logEl.scrollTop = logEl.scrollHeight; 
+      };
+
+      // State management
+      let currentStep = 0;
+      let isServerSetup = false;
+      let isAppInstalled = false;
+      let isServicesRunning = false;
+
+      // UI State Management
+      const updateUIState = () => {
+        const installDir = document.getElementById('installDir').value.trim();
+        const hasInstallDir = installDir !== '';
+
+        // Update step indicators
+        document.querySelectorAll('.step').forEach((step, index) => {
+          step.classList.remove('active', 'completed');
+          if (index < currentStep) step.classList.add('completed');
+          else if (index === currentStep) step.classList.add('active');
+        });
+
+        // Update button states
+        const setupBtn = document.getElementById('setupServer');
+        const installBtn = document.getElementById('installApp');
+        const startBtn = document.getElementById('startServices');
+        const stopBtn = document.getElementById('stop');
+        const openBtn = document.getElementById('open');
+
+        // Setup Server button
+        setupBtn.disabled = !hasInstallDir || isServerSetup;
+        setupBtn.title = !hasInstallDir ? 'Choose install folder first' : 
+                        isServerSetup ? 'Server already set up' : 'Install PHP, Node.js, PostgreSQL';
+        setupBtn.querySelector('.status-indicator').className = 
+          `status-indicator ${!hasInstallDir ? 'status-pending' : isServerSetup ? 'status-success' : 'status-pending'}`;
+
+        // Install App button
+        installBtn.disabled = !isServerSetup || isAppInstalled;
+        installBtn.title = !isServerSetup ? 'Setup server first' : 
+                          isAppInstalled ? 'App already installed' : 'Install Laravel application';
+        installBtn.querySelector('.status-indicator').className = 
+          `status-indicator ${!isServerSetup ? 'status-pending' : isAppInstalled ? 'status-success' : 'status-pending'}`;
+
+        // Start Services button
+        startBtn.disabled = !isAppInstalled || isServicesRunning;
+        startBtn.title = !isAppInstalled ? 'Install app first' : 
+                        isServicesRunning ? 'Services already running' : 'Start database and web server';
+        startBtn.querySelector('.status-indicator').className = 
+          `status-indicator ${!isAppInstalled ? 'status-pending' : isServicesRunning ? 'status-success' : 'status-pending'}`;
+
+        // Stop button
+        stopBtn.disabled = !isServicesRunning;
+        stopBtn.title = isServicesRunning ? 'Stop all services' : 'No services running';
+
+        // Open App button
+        openBtn.disabled = !isServicesRunning;
+        openBtn.title = isServicesRunning ? 'Open application in browser' : 'Start services first';
+
+        // Update current step
+        if (isServicesRunning) currentStep = 3;
+        else if (isAppInstalled) currentStep = 2;
+        else if (isServerSetup) currentStep = 1;
+        else if (hasInstallDir) currentStep = 0;
+      };
+
+      const populateFormFromEnv = (env) => {
+        const set = (id, key, transform) => {
+          if (env[key] !== undefined) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.value = transform ? transform(env[key]) : env[key];
+          }
+        };
+        set('appName', 'APP_NAME');
+        set('appEnv', 'APP_ENV');
+        set('appKey', 'APP_KEY');
+        set('appDebug', 'APP_DEBUG');
+        set('webPort', 'APP_URL', (u) => {
+          try { const m = String(u).match(/:(\d+)(?:\/|$)/); return m ? m[1] : document.getElementById('webPort').value; } catch { return document.getElementById('webPort').value; }
+        });
+        set('dbConn', 'DB_CONNECTION');
+        set('dbHost', 'DB_HOST');
+        set('pgPort', 'DB_PORT');
+        set('pgDb', 'DB_DATABASE');
+        set('pgUser', 'DB_USERNAME');
+        set('pgPass', 'DB_PASSWORD');
+        set('logChannel', 'LOG_CHANNEL');
+        set('logDepCh', 'LOG_DEPRECATIONS_CHANNEL');
+        set('logLevel', 'LOG_LEVEL');
+        set('broadcastDriver', 'BROADCAST_DRIVER');
+        set('fsDisk', 'FILESYSTEM_DISK');
+        set('queueConn', 'QUEUE_CONNECTION');
+        set('sessionDriver', 'SESSION_DRIVER');
+        set('sessionLifetime', 'SESSION_LIFETIME');
+      };
+
+      // Event handlers
+      document.getElementById('browse').addEventListener('click', async () => {
+        const dir = await window.api.chooseInstallDir();
+        if (!dir) return;
+        document.getElementById('installDir').value = dir;
+        append('📁 Install folder selected: ' + dir);
+        
+        // Reset states first
+        isServerSetup = false;
+        isAppInstalled = false;
+        isServicesRunning = false;
+        
+        // Check if this is a valid existing installation
+        try { 
+          const installCheck = await window.api.checkInstallation(dir);
+          const env = await window.api.readEnv(dir);
+          
+          if (installCheck.hasValidInstallation) {
+            // Complete installation found
+            populateFormFromEnv(env);
+            isServerSetup = true;
+            isAppInstalled = true;
+            append('✅ Found complete installation');
+            append(`📋 Components: PHP(${installCheck.components.php ? '✓' : '✗'}), Node(${installCheck.components.node ? '✓' : '✗'}), PostgreSQL(${installCheck.components.postgresql ? '✓' : '✗'}), App(${installCheck.components.app ? '✓' : '✗'})`);
+          } else if (installCheck.hasServerStack && !installCheck.hasAppInstallation) {
+            // Server setup done, but app not installed
+            if (env && Object.keys(env).length > 0) populateFormFromEnv(env);
+            isServerSetup = true;
+            isAppInstalled = false;
+            append('⚠️ Found server stack but app not installed');
+            append('📋 Ready to install application');
+          } else if (!installCheck.hasServerStack && installCheck.hasAppInstallation) {
+            // App exists but server stack incomplete
+            if (env && Object.keys(env).length > 0) populateFormFromEnv(env);
+            isServerSetup = false;
+            isAppInstalled = false;
+            append('⚠️ Found app files but server stack incomplete');
+            append('📋 Please complete server setup first');
+          } else if (env && Object.keys(env).length > 0) {
+            // .env exists but no valid components
+            populateFormFromEnv(env);
+            append('⚠️ Found configuration file but installation appears incomplete');
+            append('📋 Previous configuration loaded, please verify and continue installation');
+          } else {
+            // Fresh installation
+            append('📋 Empty folder - ready for new installation');
+          }
+        } catch (err) {
+          append('📋 Ready for new installation');
+          console.error('Installation check failed:', err);
+        }
+        updateUIState();
+      });
+
+      // Toggle buttons
+      document.getElementById('toggleAdvanced').addEventListener('click', () => {
+        const advanced = document.getElementById('advancedSettings');
+        const btn = document.getElementById('toggleAdvanced');
+        const isVisible = advanced.style.display !== 'none';
+        advanced.style.display = isVisible ? 'none' : 'block';
+        btn.textContent = isVisible ? 'Show Advanced' : 'Hide Advanced';
+      });
+
+      document.getElementById('togglePayloads').addEventListener('click', () => {
+        const payloads = document.getElementById('customPayloads');
+        const btn = document.getElementById('togglePayloads');
+        const isVisible = payloads.style.display !== 'none';
+        payloads.style.display = isVisible ? 'none' : 'block';
+        btn.textContent = isVisible ? 'Custom Payloads' : 'Hide Payloads';
+      });
+
+      window.api.onInstallerEvent((evt) => {
+        if (evt.message) append(`[${evt.stage}] ${evt.message}`);
+        if (evt.log) append(evt.log.trim());
+        if (evt.url) append(`🌐 App running at ${evt.url}`);
+        
+        // Handle port updates from installer
+        if (evt.type === 'port-update' && evt.webPort && evt.pgPort) {
+          document.getElementById('webPort').value = evt.webPort;
+          document.getElementById('pgPort').value = evt.pgPort;
+          append(`🔄 Ports updated - Web: ${evt.webPort}, DB: ${evt.pgPort}`);
+        }
+        
+        // Update state based on stage
+        if (evt.stage === 'complete' || evt.message?.includes('finished')) {
+          if (evt.stage.includes('setup') || evt.message.includes('Server setup')) {
+            isServerSetup = true;
+            append('✅ Server setup completed');
+          }
+          if (evt.stage.includes('install') || evt.message.includes('installation finished')) {
+            isAppInstalled = true;
+            append('✅ Application installation completed');
+          }
+          if (evt.stage.includes('start') || evt.url) {
+            isServicesRunning = true;
+            append('✅ Services started successfully');
+          }
+          updateUIState();
+        }
+      });
+
+      // Setup Server: installs PHP/Apache/Node/Postgres and provisions DB
+      document.getElementById('setupServer').addEventListener('click', async () => {
+        const installDir = document.getElementById('installDir').value.trim();
+        if (!installDir) { append('❌ Please choose an install folder.'); return; }
+        
+        const btn = document.getElementById('setupServer');
+        btn.disabled = true;
+        btn.querySelector('.status-indicator').className = 'status-indicator status-running';
+        
+        const options = {
+          installDir,
+          appName: document.getElementById('appName').value,
+          webPort: parseInt(document.getElementById('webPort').value, 10),
+          pgPort: parseInt(document.getElementById('pgPort').value, 10),
+          pgDatabase: document.getElementById('pgDb').value,
+          pgUser: document.getElementById('pgUser').value,
+          pgPassword: document.getElementById('pgPass').value,
+          // local zip paths if provided
+          phpZip: document.getElementById('phpZip').value,
+          nodeZip: document.getElementById('nodeZip').value,
+          postgresZip: document.getElementById('pgZip').value,
+          // env overrides
+          appEnv: document.getElementById('appEnv').value,
+          appKey: document.getElementById('appKey').value,
+          appDebug: document.getElementById('appDebug').value,
+          dbConnection: document.getElementById('dbConn').value,
+          dbHost: document.getElementById('dbHost').value,
+          logChannel: document.getElementById('logChannel').value,
+          logDeprecationsChannel: document.getElementById('logDepCh').value,
+          logLevel: document.getElementById('logLevel').value,
+          broadcastDriver: document.getElementById('broadcastDriver').value,
+          filesystemDisk: document.getElementById('fsDisk').value,
+          queueConnection: document.getElementById('queueConn').value,
+          sessionDriver: document.getElementById('sessionDriver').value,
+          sessionLifetime: parseInt(document.getElementById('sessionLifetime').value, 10),
+        };
+        try {
+          append('🔧 Setting up server components...');
+          await window.api.setupServer(options);
+          isServerSetup = true;
+          btn.querySelector('.status-indicator').className = 'status-indicator status-success';
+          append('✅ Server setup completed. Ready to install application.');
+          updateUIState();
+        } catch (e) { 
+          append('❌ Server setup failed: ' + e.message);
+          btn.disabled = false;
+          btn.querySelector('.status-indicator').className = 'status-indicator status-error';
+        }
+      });
+      
+      // Install App: can be versioned and multi-source
+      document.getElementById('installApp').addEventListener('click', async () => {
+        const installDir = document.getElementById('installDir').value.trim();
+        if (!installDir) { append('❌ Please choose an install folder.'); return; }
+        
+        const btn = document.getElementById('installApp');
+        btn.disabled = true;
+        btn.querySelector('.status-indicator').className = 'status-indicator status-running';
+        
+        const options = {
+          installDir,
+          appName: document.getElementById('appName').value,
+          appEnv: document.getElementById('appEnv').value,
+          appKey: document.getElementById('appKey').value,
+          appDebug: document.getElementById('appDebug').value,
+          webPort: parseInt(document.getElementById('webPort').value, 10),
+          dbConnection: document.getElementById('dbConn').value,
+          dbHost: document.getElementById('dbHost').value,
+          pgPort: parseInt(document.getElementById('pgPort').value, 10),
+          pgDatabase: document.getElementById('pgDb').value,
+          pgUser: document.getElementById('pgUser').value,
+          pgPassword: document.getElementById('pgPass').value,
+          appZip: document.getElementById('appZip').value,
+          logChannel: document.getElementById('logChannel').value,
+          logDeprecationsChannel: document.getElementById('logDepCh').value,
+          logLevel: document.getElementById('logLevel').value,
+          broadcastDriver: document.getElementById('broadcastDriver').value,
+          filesystemDisk: document.getElementById('fsDisk').value,
+          queueConnection: document.getElementById('queueConn').value,
+          sessionDriver: document.getElementById('sessionDriver').value,
+          sessionLifetime: parseInt(document.getElementById('sessionLifetime').value, 10),
+        };
+        try {
+          append('📦 Installing Laravel application...');
+          await window.api.installApp(options);
+          isAppInstalled = true;
+          btn.querySelector('.status-indicator').className = 'status-indicator status-success';
+          append('✅ Application installed successfully. Ready to start services.');
+          // Reload .env into form
+          try { const env = await window.api.readEnv(installDir); populateFormFromEnv(env); } catch (_) {}
+          updateUIState();
+        } catch (e) { 
+          append('❌ App installation failed: ' + e.message);
+          btn.disabled = false;
+          btn.querySelector('.status-indicator').className = 'status-indicator status-error';
+        }
+      });
+
+      // Start only services
+      document.getElementById('startServices').addEventListener('click', async () => {
+        const installDir = document.getElementById('installDir').value.trim();
+        if (!installDir) { append('❌ Please choose an install folder.'); return; }
+        
+        const btn = document.getElementById('startServices');
+        btn.disabled = true;
+        btn.querySelector('.status-indicator').className = 'status-indicator status-running';
+        
+        const options = {
+          installDir,
+          webPort: parseInt(document.getElementById('webPort').value, 10),
+          pgPort: parseInt(document.getElementById('pgPort').value, 10),
+        };
+        try { 
+          append('🚀 Starting database and web server...');
+          await window.api.startServices(options);
+          isServicesRunning = true;
+          btn.querySelector('.status-indicator').className = 'status-indicator status-success';
+          append('✅ All services started successfully. Application is ready!');
+          updateUIState();
+        } catch (e) { 
+          append('❌ Failed to start services: ' + e.message);
+          btn.disabled = false;
+          btn.querySelector('.status-indicator').className = 'status-indicator status-error';
+        }
+      });
+
+      document.getElementById('stop').addEventListener('click', async () => {
+        const installDir = document.getElementById('installDir').value.trim();
+        const options = {
+          installDir: installDir || '',
+          webPort: parseInt(document.getElementById('webPort').value, 10),
+          pgPort: parseInt(document.getElementById('pgPort').value, 10),
+        };
+        try { 
+          append('⏹️ Stopping all services...');
+          await window.api.stop(options);
+          isServicesRunning = false;
+          
+          // Reset status indicators
+          document.querySelectorAll('.status-indicator').forEach(indicator => {
+            if (indicator.classList.contains('status-running')) {
+              indicator.className = 'status-indicator status-pending';
+            }
+          });
+          
+          append('⏹️ All services stopped.');
+          updateUIState();
+        } catch (e) { 
+          append('❌ Stop failed: ' + e.message); 
+        }
+      });
+
+      document.getElementById('cleanupPorts').addEventListener('click', async () => {
+        try { 
+          append('🧹 Force killing all Laravel and PostgreSQL processes...');
+          await window.api.cleanupPorts();
+          isServicesRunning = false;
+          
+          // Reset status indicators
+          document.querySelectorAll('.status-indicator').forEach(indicator => {
+            if (indicator.classList.contains('status-running')) {
+              indicator.className = 'status-indicator status-pending';
+            }
+          });
+          
+          append('🧹 Port cleanup completed. All Laravel and PostgreSQL processes terminated.');
+          updateUIState();
+        } catch (e) { 
+          append('❌ Cleanup failed: ' + e.message); 
+        }
+      });
+
+      document.getElementById('open').addEventListener('click', async () => {
+        const webPort = parseInt(document.getElementById('webPort').value, 10) || 8080;
+        const appUrl = `http://localhost:${webPort}`;
+        try { 
+          await window.api.openApp(appUrl); 
+          append(`🌐 Opening application at ${appUrl}`);
+        } catch (e) { 
+          append('❌ Failed to open app: ' + e.message); 
+        }
+      });
+
+      // File selection handlers
+      const chooseFile = async () => window.api.chooseFile({ filters: [{ name: 'Zip', extensions: ['zip'] }] });
+      document.getElementById('pickPg').addEventListener('click', async () => { const f = await chooseFile(); if (f) document.getElementById('pgZip').value = f; });
+      document.getElementById('pickPhp').addEventListener('click', async () => { const f = await chooseFile(); if (f) document.getElementById('phpZip').value = f; });
+      document.getElementById('pickNode').addEventListener('click', async () => { const f = await chooseFile(); if (f) document.getElementById('nodeZip').value = f; });
+      document.getElementById('pickApp').addEventListener('click', async () => { const f = await chooseFile(); if (f) document.getElementById('appZip').value = f; });
+
+      // Initialize UI state
+      updateUIState();
+    </script>
+  </body>
+</html>

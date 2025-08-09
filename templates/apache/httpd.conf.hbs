@@ -1,0 +1,42 @@
+ServerRoot "{{apacheRoot}}"
+Listen {{port}}
+ServerAdmin you@example.com
+ServerName localhost:{{port}}
+
+LoadModule mpm_winnt_module modules/mod_mpm_winnt.so
+LoadModule dir_module modules/mod_dir.so
+LoadModule mime_module modules/mod_mime.so
+LoadModule alias_module modules/mod_alias.so
+LoadModule log_config_module modules/mod_log_config.so
+LoadModule headers_module modules/mod_headers.so
+LoadModule deflate_module modules/mod_deflate.so
+LoadModule rewrite_module modules/mod_rewrite.so
+
+DocumentRoot "{{appPublicDir}}"
+<Directory "{{appPublicDir}}">
+    Options Indexes FollowSymLinks
+    AllowOverride All
+    Require all granted
+</Directory>
+
+# PHP module (if using php-cgi / php module, adjust accordingly)
+# Example for PHP via fcgid or php module is omitted; recommend using php-fpm on Windows is non-trivial.
+
+ErrorLog logs/error.log
+CustomLog logs/access.log combined
+
+<IfModule mime_module>
+    TypesConfig conf/mime.types
+    AddType application/x-httpd-php .php
+</IfModule>
+
+DirectoryIndex index.php index.html
+
+# Rewrite for Laravel
+<IfModule mod_rewrite.c>
+    Options -MultiViews
+    RewriteEngine On
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteRule ^ index.php [L]
+</IfModule>

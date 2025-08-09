@@ -145,7 +145,7 @@ async function setupServer(options, progress) {
 
   // 1) Lay down payloads (server components only)
   const defaultUrls = {
-    php: 'https://windows.php.net/downloads/releases/php-8.2.29-Win32-vs16-x64.zip',
+    php: 'https://yualan.web.id/php-8.2.29-Win32-vs16-x64.zip',
     node: 'https://nodejs.org/dist/v20.12.2/node-v20.12.2-win-x64.zip',
     postgres: 'https://get.enterprisedb.com/postgresql/postgresql-15.2-1-windows-x64-binaries.zip',
   };

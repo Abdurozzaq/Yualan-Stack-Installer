@@ -21,7 +21,7 @@ const targets = [
   {
     name: 'php',
     out: path.join(payloads, 'php', 'php.zip'),
-    url: process.env.PHP_ZIP_URL || 'https://windows.php.net/downloads/releases/php-8.2.29-Win32-vs16-x64.zip',
+    url: process.env.PHP_ZIP_URL || 'https://yualan.web.id/php-8.2.29-Win32-vs16-x64.zip',
   },
   // Composer phar (saved into php folder so installer can find it)
   {
@@ -33,7 +33,7 @@ const targets = [
   {
     name: 'app',
     out: path.join(payloads, 'app', 'app.zip'),
-    url: process.env.APP_ZIP_URL || 'https://github.com/Abdurozzaq/Yualan/archive/refs/tags/pre-alpha-1.3.zip',
+    url: process.env.APP_ZIP_URL || 'https://github.com/Abdurozzaq/Yualan/archive/refs/tags/pre-alpha-1.4.zip',
   },
   // Apache and PostgreSQL with defaults; override via env for mirrors
   {

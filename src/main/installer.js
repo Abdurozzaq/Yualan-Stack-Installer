@@ -15,6 +15,7 @@ let processes = {
   postgres: null,
   laravel: null,
   queue: null,
+  scheduler: null,
 };
 
 // Handle both development and portable/ASAR scenarios
@@ -1703,6 +1704,79 @@ async function installApp(options = {}, progress) {
   return { ok: true };
 }
 
+// Start Laravel scheduler (php artisan yualan:check-pending-transactions every minute)
+async function startScheduler(phpExe, appRoot, env, progress) {
+  // Check if scheduler is already running
+  if (processes.scheduler && processes.scheduler.interval) {
+    emit(progress, { stage: 'scheduler', message: 'Scheduler is already running' });
+    return true;
+  }
+
+  emit(progress, { stage: 'scheduler', message: 'Starting Laravel scheduler (runs every minute with visible output)...' });
+  
+  const artisanPath = path.join(appRoot, 'artisan');
+  if (!phpExe || !(await fse.pathExists(artisanPath))) {
+    emit(progress, { stage: 'warn', message: 'PHP or artisan not found; skipping scheduler.' });
+    return false;
+  }
+
+  let runCount = 0;
+
+  // Function to run yualan:check-pending-transactions command
+  const runSchedule = async () => {
+    try {
+      runCount++;
+      const now = new Date().toLocaleTimeString();
+      emit(progress, { stage: 'scheduler', message: `[${now}] Running scheduled tasks (run #${runCount})...` });
+      
+      const scheduleResult = await runCommand(phpExe, [artisanPath, 'yualan:check-pending-transactions'], {
+        cwd: appRoot,
+        env,
+        progress,
+        stage: 'scheduler',
+        logPrefix: 'artisan yualan:check-pending-transactions',
+        timeoutMs: 30000,
+        quiet: false // Keep output visible for scheduler
+      });
+
+      const timeStamp = new Date().toLocaleTimeString();
+      if (scheduleResult.code === 0) {
+        // Show the actual output from yualan:check-pending-transactions
+        const output = scheduleResult.stdout || '';
+        if (output.trim()) {
+          emit(progress, { stage: 'scheduler', message: `[${timeStamp}] ${output.trim()}` });
+        } else {
+          emit(progress, { stage: 'scheduler', message: `[${timeStamp}] No scheduled tasks to run (run #${runCount} completed)` });
+        }
+      } else {
+        emit(progress, { stage: 'scheduler', message: `[${timeStamp}] Schedule run #${runCount} completed with exit code: ${scheduleResult.code}` });
+        if (scheduleResult.stderr) {
+          emit(progress, { stage: 'scheduler', message: `[${timeStamp}] Error: ${scheduleResult.stderr}` });
+        }
+      }
+    } catch (error) {
+      const timeStamp = new Date().toLocaleTimeString();
+      emit(progress, { stage: 'scheduler', message: `[${timeStamp}] Scheduler error (run #${runCount}): ${error.message}` });
+    }
+  };
+
+  // Run yualan:check-pending-transactions immediately
+  await runSchedule();
+
+  // Set up interval to run every minute (60000ms)
+  const schedulerInterval = setInterval(runSchedule, 60000);
+  
+  // Store the interval reference so we can clear it later
+  processes.scheduler = {
+    interval: schedulerInterval,
+    type: 'scheduler',
+    runCount: () => runCount
+  };
+
+  emit(progress, { stage: 'scheduler', message: 'Laravel scheduler is now running every minute with visible output' });
+  return true;
+}
+
 // Start only the services (PostgreSQL + Laravel) with smart port management
 async function startServices(progress, options = {}) {
   emit(progress, { stage: 'start', message: 'Starting services...' });
@@ -1806,35 +1880,18 @@ async function startServices(progress, options = {}) {
     emit(progress, { stage: 'warn', message: 'PHP or artisan not found; skipping app serve.' });
     emit(progress, { stage: 'debug', message: `PHP exe: ${phpExe}, Artisan: ${artisanPath}` });
   } else {
-    emit(progress, { stage: 'serve', message: `Starting Laravel on port ${webPort} (php artisan serve)...` });
+    emit(progress, { stage: 'serve', message: `Starting Laravel server in background on port ${webPort}...` });
     emit(progress, { stage: 'debug', message: `Using PHP: ${phpExe}` });
     emit(progress, { stage: 'debug', message: `App root: ${appRoot}` });
     
     try { if (processes.laravel && processes.laravel.pid) { treeKill(processes.laravel.pid); } } catch (_) {}
     
-    // Start Laravel with visible stdout/stderr for debugging
+    // Start Laravel server silently in background
     const serveProc = spawn(phpExe, [artisanPath, 'serve', '--host', '127.0.0.1', '--port', String(webPort)], { 
       env, 
-      stdio: ['ignore', 'pipe', 'pipe'], // stdin ignored, stdout and stderr piped
+      stdio: ['ignore', 'ignore', 'ignore'], // All stdio ignored for silent background operation
       detached: false,
       cwd: appRoot
-    });
-    
-    // Log Laravel server output
-    serveProc.stdout?.on('data', (data) => {
-      const output = data.toString().trim();
-      if (output) {
-        emit(progress, { stage: 'serve', message: `Laravel: ${output}` });
-        console.log(`[Laravel stdout] ${output}`);
-      }
-    });
-    
-    serveProc.stderr?.on('data', (data) => {
-      const output = data.toString().trim();
-      if (output) {
-        emit(progress, { stage: 'serve', message: `Laravel Error: ${output}` });
-        console.log(`[Laravel stderr] ${output}`);
-      }
     });
     
     serveProc.on('close', (code) => {
@@ -1842,6 +1899,14 @@ async function startServices(progress, options = {}) {
       emit(progress, { stage: 'serve', message: msg });
       console.log(`[Laravel] ${msg}`);
       processes.laravel = null;
+      
+      // Stop scheduler when Laravel stops
+      if (processes.scheduler && processes.scheduler.interval) {
+        clearInterval(processes.scheduler.interval);
+        processes.scheduler = null;
+        emit(progress, { stage: 'scheduler', message: 'Scheduler stopped (Laravel server stopped)' });
+        console.log('[Scheduler] Stopped due to Laravel server exit');
+      }
     });
     
     serveProc.on('error', (err) => {
@@ -1849,18 +1914,34 @@ async function startServices(progress, options = {}) {
       emit(progress, { stage: 'serve', message: msg });
       console.log(`[Laravel] ${msg}`);
       processes.laravel = null;
+      
+      // Stop scheduler when Laravel errors
+      if (processes.scheduler && processes.scheduler.interval) {
+        clearInterval(processes.scheduler.interval);
+        processes.scheduler = null;
+        emit(progress, { stage: 'scheduler', message: 'Scheduler stopped (Laravel server error)' });
+        console.log('[Scheduler] Stopped due to Laravel server error');
+      }
     });
     
     processes.laravel = serveProc;
     
-    // Give Laravel a moment to start up
-    setTimeout(() => {
-      emit(progress, { stage: 'serve', message: `Laravel server running on http://127.0.0.1:${webPort}` });
-      console.log(`[Laravel] Server available at http://127.0.0.1:${webPort}`);
+    // Give Laravel a moment to start up, then start scheduler
+    setTimeout(async () => {
+      emit(progress, { stage: 'serve', message: `Laravel server running silently in background on http://127.0.0.1:${webPort}` });
+      console.log(`[Laravel] Server running silently at http://127.0.0.1:${webPort}`);
+      
+      // Start the scheduler after Laravel is ready
+      try {
+        await startScheduler(phpExe, appRoot, env, progress);
+      } catch (error) {
+        emit(progress, { stage: 'scheduler', message: `Failed to start scheduler: ${error.message}` });
+        console.log(`[Scheduler] Failed to start: ${error.message}`);
+      }
     }, 2000);
   }
   const appUrl = `http://localhost:${webPort}`;
-  emit(progress, { stage: 'done', message: `Services started. PostgreSQL on port ${pgPort}, Laravel on port ${webPort}.` });
+  emit(progress, { stage: 'done', message: `Services started. PostgreSQL on port ${pgPort}, Laravel server running silently on port ${webPort}, Scheduler showing output every minute.` });
   emit(progress, { stage: 'url', url: appUrl });
   return { ok: true };
 }
@@ -1873,6 +1954,17 @@ async function stop(options = {}) {
   const env = makeEnvFromRoots(process.env, roots);
 
   console.log('Stopping all services...');
+
+  // Stop Laravel scheduler (if running)
+  try {
+    if (processes.scheduler && processes.scheduler.interval) {
+      console.log('Stopping Laravel scheduler...');
+      clearInterval(processes.scheduler.interval);
+    }
+  } catch (e) {
+    console.log(`Error stopping scheduler: ${e.message}`);
+  }
+  processes.scheduler = null;
 
   // Stop Laravel serve (tracked)
   try {
@@ -2079,9 +2171,13 @@ async function cleanupPorts() {
   }
   
   // Reset our tracked processes
+  if (processes.scheduler && processes.scheduler.interval) {
+    clearInterval(processes.scheduler.interval);
+  }
   processes.postgres = null;
   processes.laravel = null;
   processes.queue = null;
+  processes.scheduler = null;
   
   console.log('Force cleanup completed.');
   return { ok: true };

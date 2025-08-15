@@ -12,12 +12,12 @@ let lastOptions = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 800,
-    height: 650,
-    minWidth: 800,
-    minHeight: 650,
-    maxWidth: 800,
-    maxHeight: 650,
+    width: 1366,
+    height: 720,
+    minWidth: 1366,
+    minHeight: 720,
+    maxWidth: 1366,
+    maxHeight: 720,
     resizable: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -119,6 +119,14 @@ ipcMain.handle('installer:stop', async (_evt, options) => {
 });
 ipcMain.handle('installer:cleanup-ports', async () => {
   return installer.cleanupPorts();
+});
+
+ipcMain.handle('installer:get-activity-logs', async (_evt, activity) => {
+  return installer.getActivityLogs(activity);
+});
+
+ipcMain.handle('installer:clear-activity-logs', async (_evt, activity) => {
+  return installer.clearActivityLogs(activity);
 });
 ipcMain.handle('installer:open', async (_evt, url) => {
   const appUrl = url || store.get('appUrl') || 'http://localhost:8080';

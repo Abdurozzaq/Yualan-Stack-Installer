@@ -14,5 +14,7 @@ contextBridge.exposeInMainWorld('api', {
   resetDb: () => ipcRenderer.invoke('installer:reset-db'),
   readEnv: (installDir) => ipcRenderer.invoke('installer:read-env', installDir),
   checkInstallation: (installDir) => ipcRenderer.invoke('installer:check-installation', installDir),
+  getActivityLogs: (activity) => ipcRenderer.invoke('installer:get-activity-logs', activity),
+  clearActivityLogs: (activity) => ipcRenderer.invoke('installer:clear-activity-logs', activity),
   onInstallerEvent: (cb) => ipcRenderer.on('installer:event', (_e, data) => cb(data)),
 });

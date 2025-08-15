@@ -4,18 +4,48 @@ const fs = require('fs');
 const fse = require('fs-extra');
 const net = require('net');
 const crypto = require('crypto');
+const http = require('http');
 const { DownloaderHelper } = require('node-downloader-helper');
 const extract = require('extract-zip');
 const Handlebars = require('handlebars');
 const { spawn } = require('child_process');
 const treeKill = require('tree-kill');
 
+// Resolve absolute paths to Windows executables to avoid ENOENT in sanitized PATH environments
+function resolveWindowsExe(exeRelative) {
+  if (process.platform !== 'win32') return null;
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+  const candidates = [];
+  // Special-case cmd.exe via COMSPEC
+  if (/cmd\.exe$/i.test(exeRelative)) {
+    if (process.env.ComSpec) candidates.push(process.env.ComSpec);
+    if (process.env.COMSPEC) candidates.push(process.env.COMSPEC);
+  }
+  candidates.push(
+    path.join(systemRoot, 'System32', exeRelative),
+    path.join(systemRoot, 'Sysnative', exeRelative), // for 32-bit process on 64-bit OS
+    path.join(systemRoot, 'system32', exeRelative)
+  );
+  for (const p of candidates) {
+    try { if (p && fs.existsSync(p)) return p; } catch (_) {}
+  }
+  return null;
+}
+
 // State
 let processes = {
   postgres: null,
   laravel: null,
+  laravelBatchFile: null, // Store batch file path for cleanup
   queue: null,
   scheduler: null,
+  pendingTransactions: null,
+  activityLogs: {
+    postgres: [],
+    laravel: [],
+    scheduler: [],
+    pendingTransactions: []
+  }
 };
 
 // Handle both development and portable/ASAR scenarios
@@ -54,6 +84,36 @@ console.log('[Installer Debug] templatesBase exists:', fs.existsSync(templatesBa
 
 function emit(progress, evt) {
   if (typeof progress === 'function') progress(evt);
+}
+
+// Add activity log management
+function addActivityLog(activity, message, type = 'info', progress = null) {
+  const timestamp = new Date().toLocaleTimeString();
+  const logEntry = {
+    timestamp,
+    message,
+    type,
+    activity
+  };
+  
+  if (processes.activityLogs[activity]) {
+    processes.activityLogs[activity].push(logEntry);
+    // Keep only last 100 entries per activity
+    if (processes.activityLogs[activity].length > 100) {
+      processes.activityLogs[activity] = processes.activityLogs[activity].slice(-100);
+    }
+  }
+  
+  // Emit to UI with activity context
+  if (progress && typeof progress === 'function') {
+    progress({
+      stage: activity,
+      message,
+      activity,
+      activityLog: logEntry,
+      allLogs: processes.activityLogs[activity] || []
+    });
+  }
 }
 
 function renderTemplate(file, data) {
@@ -1443,9 +1503,9 @@ async function installApp(options = {}, progress) {
     }
     await writePgHba(pgDataDir, progress);
     // Start
-    pgCtlPath = await findBinary(path.join(roots.pgRoot || pgRoot, 'bin'), ['pg_ctl.exe', 'pg_ctl']);
+    pgCtlPath = await findBinary(path.join(roots.pgRoot || pgDir, 'bin'), ['pg_ctl.exe', 'pg_ctl']);
     if (!pgCtlPath) throw new Error('pg_ctl not found');
-    const serverLog = path.join(roots.pgRoot || pgRoot, 'logs', 'server.log');
+    const serverLog = path.join(roots.pgRoot || pgDir, 'logs', 'server.log');
     await fse.ensureDir(path.dirname(serverLog));
     const startArgs = ['start', '-w', '-t', '60', '-D', pgDataDir, '-l', serverLog, '-o', `-c port=${pgPort} -c listen_addresses=127.0.0.1`];
     const startRes = await runCommand(pgCtlPath, startArgs, { env, progress, stage: 'postgres', logPrefix: 'pg_ctl start (install app)', timeoutMs: 70000, quiet: true });
@@ -1616,7 +1676,7 @@ async function installApp(options = {}, progress) {
             });
             
             if (buildResult.code !== 0) {
-              emit(progress, { stage: 'npm', message: `Build failed with ${packageManager.strategy}, exit code: ${buildResult.code}` });
+              emit(progress, { stage: 'npm', message: `Build failed with ${packageManager.strategy}, but continuing...` });
             } else {
               emit(progress, { stage: 'npm', message: 'Frontend build completed successfully' });
             }
@@ -1708,72 +1768,237 @@ async function installApp(options = {}, progress) {
 async function startScheduler(phpExe, appRoot, env, progress) {
   // Check if scheduler is already running
   if (processes.scheduler && processes.scheduler.interval) {
-    emit(progress, { stage: 'scheduler', message: 'Scheduler is already running' });
+    emit(progress, { stage: 'scheduler', message: 'Scheduler is already running', activity: 'scheduler' });
     return true;
   }
 
-  emit(progress, { stage: 'scheduler', message: 'Starting Laravel scheduler (runs every minute with visible output)...' });
+  emit(progress, { stage: 'scheduler', message: 'Starting Laravel scheduler (runs every minute with visible output)...', activity: 'scheduler' });
   
   const artisanPath = path.join(appRoot, 'artisan');
   if (!phpExe || !(await fse.pathExists(artisanPath))) {
-    emit(progress, { stage: 'warn', message: 'PHP or artisan not found; skipping scheduler.' });
+    emit(progress, { stage: 'warn', message: 'PHP or artisan not found; skipping scheduler.', activity: 'scheduler' });
     return false;
   }
 
   let runCount = 0;
+  let isRunning = false; // Prevent overlapping runs
 
   // Function to run yualan:check-pending-transactions command
   const runSchedule = async () => {
+    // Prevent overlapping runs
+    if (isRunning) {
+      console.log('[Scheduler] Previous run still in progress, skipping...');
+      return;
+    }
+    
+    // Check if Laravel server is still running
+    const laravelRunning = processes.laravel && !processes.laravel.killed && processes.laravel.pid;
+    if (!laravelRunning) {
+      console.log('[Scheduler] Laravel server not running, skipping scheduler run');
+      emit(progress, { stage: 'scheduler', message: 'Laravel server not running, scheduler paused', activity: 'scheduler' });
+      addActivityLog('scheduler', 'Laravel server not running, scheduler paused', 'warning', progress);
+      return;
+    }
+    
+    isRunning = true;
+    
     try {
       runCount++;
       const now = new Date().toLocaleTimeString();
-      emit(progress, { stage: 'scheduler', message: `[${now}] Running scheduled tasks (run #${runCount})...` });
+      emit(progress, { stage: 'scheduler', message: `[${now}] Running scheduled tasks (run #${runCount})...`, activity: 'scheduler' });
+      addActivityLog('scheduler', `Running scheduled tasks (run #${runCount})...`, 'info', progress);
+      console.log(`[Scheduler] Starting run #${runCount} at ${now}`);
       
       const scheduleResult = await runCommand(phpExe, [artisanPath, 'yualan:check-pending-transactions'], {
         cwd: appRoot,
         env,
-        progress,
+        progress: (evt) => {
+          // Forward to scheduler activity
+          emit(progress, { ...evt, activity: 'scheduler' });
+          if (evt.log) {
+            addActivityLog('scheduler', evt.log, 'output', progress);
+          }
+        },
         stage: 'scheduler',
         logPrefix: 'artisan yualan:check-pending-transactions',
-        timeoutMs: 30000,
-        quiet: false // Keep output visible for scheduler
+        timeoutMs: 45000, // Increased timeout for portable mode
+        quiet: false
       });
 
       const timeStamp = new Date().toLocaleTimeString();
       if (scheduleResult.code === 0) {
-        // Show the actual output from yualan:check-pending-transactions
         const output = scheduleResult.stdout || '';
         if (output.trim()) {
-          emit(progress, { stage: 'scheduler', message: `[${timeStamp}] ${output.trim()}` });
+          emit(progress, { stage: 'scheduler', message: `[${timeStamp}] ${output.trim()}`, activity: 'scheduler' });
+          addActivityLog('scheduler', output.trim(), 'success', progress);
+          console.log(`[Scheduler] Output: ${output.trim()}`);
         } else {
-          emit(progress, { stage: 'scheduler', message: `[${timeStamp}] No scheduled tasks to run (run #${runCount} completed)` });
+          emit(progress, { stage: 'scheduler', message: `[${timeStamp}] No scheduled tasks to run (run #${runCount} completed)`, activity: 'scheduler' });
+          addActivityLog('scheduler', `No scheduled tasks to run (run #${runCount} completed)`, 'info', progress);
+          console.log(`[Scheduler] No tasks for run #${runCount}`);
         }
       } else {
-        emit(progress, { stage: 'scheduler', message: `[${timeStamp}] Schedule run #${runCount} completed with exit code: ${scheduleResult.code}` });
+        emit(progress, { stage: 'scheduler', message: `[${timeStamp}] Schedule run #${runCount} completed with exit code: ${scheduleResult.code}`, activity: 'scheduler' });
+        addActivityLog('scheduler', `Schedule run #${runCount} completed with exit code: ${scheduleResult.code}`, 'warning', progress);
+        console.log(`[Scheduler] Run #${runCount} exit code: ${scheduleResult.code}`);
         if (scheduleResult.stderr) {
-          emit(progress, { stage: 'scheduler', message: `[${timeStamp}] Error: ${scheduleResult.stderr}` });
+          emit(progress, { stage: 'scheduler', message: `[${timeStamp}] Error: ${scheduleResult.stderr}`, activity: 'scheduler' });
+          addActivityLog('scheduler', `Error: ${scheduleResult.stderr}`, 'error', progress);
+          console.log(`[Scheduler] Run #${runCount} stderr: ${scheduleResult.stderr}`);
         }
       }
     } catch (error) {
       const timeStamp = new Date().toLocaleTimeString();
-      emit(progress, { stage: 'scheduler', message: `[${timeStamp}] Scheduler error (run #${runCount}): ${error.message}` });
+      emit(progress, { stage: 'scheduler', message: `[${timeStamp}] Scheduler error (run #${runCount}): ${error.message}`, activity: 'scheduler' });
+      addActivityLog('scheduler', `Scheduler error (run #${runCount}): ${error.message}`, 'error', progress);
+      console.log(`[Scheduler] Run #${runCount} error: ${error.message}`);
+    } finally {
+      isRunning = false;
     }
   };
 
   // Run yualan:check-pending-transactions immediately
   await runSchedule();
 
-  // Set up interval to run every minute (60000ms)
-  const schedulerInterval = setInterval(runSchedule, 60000);
+  // Set up interval to run every minute (60000ms) with better error handling
+  const schedulerInterval = setInterval(async () => {
+    try {
+      await runSchedule();
+    } catch (error) {
+      console.log(`[Scheduler] Interval error: ${error.message}`);
+    }
+  }, 60000);
   
   // Store the interval reference so we can clear it later
   processes.scheduler = {
     interval: schedulerInterval,
     type: 'scheduler',
-    runCount: () => runCount
+    runCount: () => runCount,
+    isRunning: () => isRunning
   };
 
-  emit(progress, { stage: 'scheduler', message: 'Laravel scheduler is now running every minute with visible output' });
+  emit(progress, { stage: 'scheduler', message: 'Laravel scheduler is now running every minute with visible output', activity: 'scheduler' });
+  addActivityLog('scheduler', 'Laravel scheduler is now running every minute with visible output', 'success', progress);
+  console.log('[Scheduler] Started successfully with 60-second intervals');
+  return true;
+}
+
+// Start separate pending transactions checker in its own terminal
+async function startPendingTransactionsChecker(phpExe, appRoot, env, progress) {
+  // Check if pending transactions checker is already running
+  if (processes.pendingTransactions && processes.pendingTransactions.interval) {
+    emit(progress, { stage: 'pending-transactions', message: 'Pending transactions checker is already running', activity: 'pendingTransactions' });
+    return true;
+  }
+
+  emit(progress, { stage: 'pending-transactions', message: 'Starting pending transactions checker in separate terminal (runs every 30 seconds)...', activity: 'pendingTransactions' });
+  
+  const artisanPath = path.join(appRoot, 'artisan');
+  if (!phpExe || !(await fse.pathExists(artisanPath))) {
+    emit(progress, { stage: 'warn', message: 'PHP or artisan not found; skipping pending transactions checker.', activity: 'pendingTransactions' });
+    return false;
+  }
+
+  let runCount = 0;
+  let isRunning = false; // Prevent overlapping runs
+
+  // Function to run yualan:check-pending-transactions command
+  const runPendingCheck = async () => {
+    // Prevent overlapping runs
+    if (isRunning) {
+      console.log('[Pending Transactions] Previous run still in progress, skipping...');
+      return;
+    }
+    
+    // Check if Laravel server is still running
+    const laravelRunning = processes.laravel && !processes.laravel.killed && processes.laravel.pid;
+    if (!laravelRunning) {
+      console.log('[Pending Transactions] Laravel server not running, skipping pending transactions check');
+      emit(progress, { stage: 'pending-transactions', message: 'Laravel server not running, pending transactions checker paused', activity: 'pendingTransactions' });
+      addActivityLog('pendingTransactions', 'Laravel server not running, pending transactions checker paused', 'warning', progress);
+      return;
+    }
+    
+    isRunning = true;
+    
+    try {
+      runCount++;
+      const now = new Date().toLocaleTimeString();
+      emit(progress, { stage: 'pending-transactions', message: `[${now}] Checking pending transactions (run #${runCount})...`, activity: 'pendingTransactions' });
+      addActivityLog('pendingTransactions', `Checking pending transactions (run #${runCount})...`, 'info', progress);
+      console.log(`[Pending Transactions] Starting check #${runCount} at ${now}`);
+      
+      const checkResult = await runCommand(phpExe, [artisanPath, 'yualan:check-pending-transactions'], {
+        cwd: appRoot,
+        env,
+        progress: (evt) => {
+          // Forward to pending transactions activity
+          emit(progress, { ...evt, activity: 'pendingTransactions' });
+          if (evt.log) {
+            addActivityLog('pendingTransactions', evt.log, 'output', progress);
+          }
+        },
+        stage: 'pending-transactions',
+        logPrefix: 'artisan yualan:check-pending-transactions (separate)',
+        timeoutMs: 45000, // Increased timeout for portable mode
+        quiet: false
+      });
+
+      const timeStamp = new Date().toLocaleTimeString();
+      if (checkResult.code === 0) {
+        const output = checkResult.stdout || '';
+        if (output.trim()) {
+          emit(progress, { stage: 'pending-transactions', message: `[${timeStamp}] ${output.trim()}`, activity: 'pendingTransactions' });
+          addActivityLog('pendingTransactions', output.trim(), 'success', progress);
+          console.log(`[Pending Transactions] Output: ${output.trim()}`);
+        } else {
+          emit(progress, { stage: 'pending-transactions', message: `[${timeStamp}] No pending transactions found (run #${runCount} completed)`, activity: 'pendingTransactions' });
+          addActivityLog('pendingTransactions', `No pending transactions found (run #${runCount} completed)`, 'info', progress);
+          console.log(`[Pending Transactions] No pending transactions for check #${runCount}`);
+        }
+      } else {
+        emit(progress, { stage: 'pending-transactions', message: `[${timeStamp}] Pending transactions check #${runCount} completed with exit code: ${checkResult.code}`, activity: 'pendingTransactions' });
+        addActivityLog('pendingTransactions', `Pending transactions check #${runCount} completed with exit code: ${checkResult.code}`, 'warning', progress);
+        console.log(`[Pending Transactions] Check #${runCount} exit code: ${checkResult.code}`);
+        if (checkResult.stderr) {
+          emit(progress, { stage: 'pending-transactions', message: `[${timeStamp}] Error: ${checkResult.stderr}`, activity: 'pendingTransactions' });
+          addActivityLog('pendingTransactions', `Error: ${checkResult.stderr}`, 'error', progress);
+          console.log(`[Pending Transactions] Check #${runCount} stderr: ${checkResult.stderr}`);
+        }
+      }
+    } catch (error) {
+      const timeStamp = new Date().toLocaleTimeString();
+      emit(progress, { stage: 'pending-transactions', message: `[${timeStamp}] Pending transactions checker error (run #${runCount}): ${error.message}`, activity: 'pendingTransactions' });
+      addActivityLog('pendingTransactions', `Pending transactions checker error (run #${runCount}): ${error.message}`, 'error', progress);
+      console.log(`[Pending Transactions] Check #${runCount} error: ${error.message}`);
+    } finally {
+      isRunning = false;
+    }
+  };
+
+  // Run pending transactions check immediately
+  await runPendingCheck();
+
+  // Set up interval to run every 30 seconds (30000ms) with better error handling
+  const pendingInterval = setInterval(async () => {
+    try {
+      await runPendingCheck();
+    } catch (error) {
+      console.log(`[Pending Transactions] Interval error: ${error.message}`);
+    }
+  }, 30000);
+  
+  // Store the interval reference so we can clear it later
+  processes.pendingTransactions = {
+    interval: pendingInterval,
+    type: 'pendingTransactions',
+    runCount: () => runCount,
+    isRunning: () => isRunning
+  };
+
+  emit(progress, { stage: 'pending-transactions', message: 'Pending transactions checker is now running every 30 seconds in separate terminal', activity: 'pendingTransactions' });
+  addActivityLog('pendingTransactions', 'Pending transactions checker is now running every 30 seconds in separate terminal', 'success', progress);
+  console.log('[Pending Transactions] Started successfully with 30-second intervals');
   return true;
 }
 
@@ -1822,7 +2047,7 @@ async function startServices(progress, options = {}) {
   if (!pgCtl) throw new Error('pg_ctl not found');
   await fse.ensureDir(path.join(roots.pgRoot || pgDir, 'logs'));
   const serverLog = path.join(roots.pgRoot || pgDir, 'logs', 'server.log');
-  const startArgs = ['start', '-w', '-t', '60', '-D', pgDataDir, '-l', serverLog, '-o', `-c port=${pgPort} -c listen_addresses=127.0.0.1`];
+  const startArgs = ['start', '-w', '-t', '60', '-D', pgDataDir, '-l', serverLog, '-o', `-c port=${port} -c listen_addresses=127.0.0.1`];
   emit(progress, { stage: 'postgres', message: `Starting PostgreSQL on port ${pgPort}...` });
   const startRes = await runCommand(pgCtl, startArgs, { env, progress, stage: 'postgres', logPrefix: 'pg_ctl start', timeoutMs: 70000, quiet: true });
   if (startRes.code !== 0) {
@@ -1830,13 +2055,13 @@ async function startServices(progress, options = {}) {
     emit(progress, { stage: 'postgres', log: `pg_ctl start failed. Logs:\n${logs}` });
     throw new Error('PostgreSQL failed to start');
   }
-  const ok = await waitForPostgres(roots.pgRoot || pgDir, pgPort, env, progress, { retries: 90, delayMs: 1000 });
+  const ok = await waitForPostgres(roots.pgRoot || pgDir, port, env, progress, { retries: 90, delayMs: 1000 });
   if (!ok) {
     const logs = await readBestPgLogs(pgDataDir, path.dirname(serverLog));
     emit(progress, { stage: 'postgres', log: `PostgreSQL did not become ready. Logs:\n${logs}` });
     throw new Error('PostgreSQL not ready');
   }
-  emit(progress, { stage: 'postgres', message: `PostgreSQL is ready on port ${pgPort}.` });
+  emit(progress, { stage: 'postgres', message: 'PostgreSQL is ready on port ${pgPort}.' });
 
   // Build frontend (npm run build) before serving, if available
   try {
@@ -1857,12 +2082,14 @@ async function startServices(progress, options = {}) {
         const buildResult = await runCommand(packageManager.cmd, buildCmd, { 
           cwd: appRoot, 
           env: packageManager.strategy === 'bundled' ? 
-                { ...env, PATH: (roots.nodeRoot || path.join(stackDir, 'node')) + path.delimiter + env.PATH } : env,
+                { ...env, PATH: (roots.nodeRoot || nodeDir) + path.delimiter + env.PATH } : env,
           progress, stage: 'npm', logPrefix: `${packageManager.strategy} run build` 
         });
         
         if (buildResult.code !== 0) {
           emit(progress, { stage: 'npm', message: `Build failed with ${packageManager.strategy}, but continuing...` });
+        } else {
+          emit(progress, { stage: 'npm', message: 'Frontend build completed successfully' });
         }
       } else {
         emit(progress, { stage: 'npm', message: 'No package manager found; skipping build.' });
@@ -1880,65 +2107,458 @@ async function startServices(progress, options = {}) {
     emit(progress, { stage: 'warn', message: 'PHP or artisan not found; skipping app serve.' });
     emit(progress, { stage: 'debug', message: `PHP exe: ${phpExe}, Artisan: ${artisanPath}` });
   } else {
-    emit(progress, { stage: 'serve', message: `Starting Laravel server in background on port ${webPort}...` });
+    emit(progress, { stage: 'serve', message: `Starting Laravel server in background on port ${webPort}...`, activity: 'laravel' });
     emit(progress, { stage: 'debug', message: `Using PHP: ${phpExe}` });
     emit(progress, { stage: 'debug', message: `App root: ${appRoot}` });
     
     try { if (processes.laravel && processes.laravel.pid) { treeKill(processes.laravel.pid); } } catch (_) {}
     
-    // Start Laravel server silently in background
-    const serveProc = spawn(phpExe, [artisanPath, 'serve', '--host', '127.0.0.1', '--port', String(webPort)], { 
-      env, 
-      stdio: ['ignore', 'ignore', 'ignore'], // All stdio ignored for silent background operation
-      detached: false,
-      cwd: appRoot
-    });
-    
-    serveProc.on('close', (code) => {
-      const msg = `Laravel server exited with code ${code}`;
-      emit(progress, { stage: 'serve', message: msg });
-      console.log(`[Laravel] ${msg}`);
-      processes.laravel = null;
-      
-      // Stop scheduler when Laravel stops
-      if (processes.scheduler && processes.scheduler.interval) {
-        clearInterval(processes.scheduler.interval);
-        processes.scheduler = null;
-        emit(progress, { stage: 'scheduler', message: 'Scheduler stopped (Laravel server stopped)' });
-        console.log('[Scheduler] Stopped due to Laravel server exit');
+    // Double-check port availability before starting
+    const portAvailable = await isPortFree(webPort);
+    if (!portAvailable) {
+      emit(progress, { stage: 'serve', message: `Port ${webPort} is busy, attempting to free it...`, activity: 'laravel' });
+      const killed = await killPortProcess(webPort, progress);
+      if (!killed) {
+        // Try to find alternative port
+        let alternativePort = webPort;
+        for (let i = 1; i <= 20; i++) {
+          alternativePort = webPort + i;
+          if (await isPortFree(alternativePort)) {
+            emit(progress, { stage: 'serve', message: `Using alternative port ${alternativePort}`, activity: 'laravel' });
+            
+            // Update .env file with new port
+            await writeEnvValue(appRoot, 'APP_URL', `http://localhost:${alternativePort}`);
+            
+            // Send port update to UI
+            emit(progress, { 
+              stage: 'port-update', 
+              type: 'port-update',
+              webPort: webPort,
+              pgPort: pgPort,
+              message: `Web port updated to ${webPort}` 
+            });
+            
+            webPort = alternativePort;
+            break;
+          }
+        }
       }
-    });
-    
-    serveProc.on('error', (err) => {
-      const msg = `Laravel server error: ${err.message}`;
-      emit(progress, { stage: 'serve', message: msg });
-      console.log(`[Laravel] ${msg}`);
-      processes.laravel = null;
       
-      // Stop scheduler when Laravel errors
-      if (processes.scheduler && processes.scheduler.interval) {
-        clearInterval(processes.scheduler.interval);
-        processes.scheduler = null;
-        emit(progress, { stage: 'scheduler', message: 'Scheduler stopped (Laravel server error)' });
-        console.log('[Scheduler] Stopped due to Laravel server error');
+      // Wait a moment after port cleanup
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    
+    // Start Laravel server with enhanced error handling and retry logic
+    let serveProc = null;
+    //
+    
+    const startLaravelServer = async (attempt = 1) => {
+      try {
+        emit(progress, { stage: 'serve', message: `Starting Laravel server in visible terminal (attempt ${attempt}/5)...`, activity: 'laravel' });
+        let serveProc;
+        if (process.env.NODE_ENV !== 'development' && process.platform === 'win32') {
+          // Portable: batch file + visible CMD
+          const batchFile = path.join(appRoot, 'start-laravel-server.bat');
+          const phpDir = path.dirname(phpExe);
+          const logsDir = path.join(appRoot, 'storage', 'logs');
+          try { fse.ensureDirSync(logsDir); } catch (_) {}
+          const logFile = path.join(logsDir, 'laravel-serve-cmd.log');
+          const batchContent = `@echo on
+setlocal enabledelayedexpansion
+title Yualan Laravel Server (Port ${webPort})
+color 0A
+set "PHP_DIR=${phpDir}"
+set "PATH=%PHP_DIR%;%PATH%"
+set "PHPRC=%PHP_DIR%"
+set "PHP_INI_SCAN_DIR=%PHP_DIR%"
+cd /d "${appRoot}"
+echo Starting Laravel development server... >> "${logFile}" 2>&1
+"${phpExe}" "${artisanPath}" serve --host=127.0.0.1 --port=${webPort} >> "${logFile}" 2>&1
+set EXITCODE=%ERRORLEVEL%
+echo.>> "${logFile}"
+echo Laravel server process exited with code %EXITCODE% >> "${logFile}"
+echo. 
+echo ================================================================
+echo Laravel server has stopped (exit code %EXITCODE%).
+echo Logs at: ${logFile}
+echo Press any key to close this window...
+pause >nul
+endlocal
+`;
+          await fse.writeFile(batchFile, batchContent, 'utf-8');
+          const cmdExe = resolveWindowsExe('cmd.exe') || 'cmd.exe';
+          serveProc = spawn(cmdExe, ['/c', 'start', '""', 'cmd.exe', '/k', batchFile], {
+            env: { ...process.env, ...env },
+            stdio: ['ignore', 'ignore', 'ignore'],
+            detached: true,
+            cwd: appRoot,
+            windowsHide: false,
+            shell: false
+          });
+          serveProc.isCmdWindow = true;
+          processes.laravelBatchFile = batchFile;
+          console.log(`[Laravel] Launched CMD window with batch file: ${batchFile}`);
+        } else {
+          // Dev mode or non-Windows: run in visible terminal if possible
+          serveProc = spawn(phpExe, [artisanPath, 'serve', '--host', '127.0.0.1', '--port', String(webPort)], {
+            env: { ...process.env, ...env },
+            stdio: 'inherit',
+            cwd: appRoot,
+            detached: false
+          });
+        }
+        
+        // Enhanced startup detection with HTTP testing
+        let startupComplete = false;
+        let hasPortError = false;
+        const startupTimeout = setTimeout(() => {
+          if (!startupComplete && !hasPortError) {
+            const windowType = useCmdWindow ? 'CMD window' : 'console window';
+            emit(progress, { stage: 'serve', message: `Laravel server ${windowType} opened - checking server availability...`, activity: 'laravel' });
+            addActivityLog('laravel', `Laravel server ${windowType} opened - checking server availability...`, 'warning', progress);
+            startupComplete = true;
+          }
+        }, 5000); // 5 second timeout for window startup
+        
+        // Monitor PHP output if using direct spawn (fallback mode)
+        if (!useCmdWindow && serveProc.stdout) {
+          serveProc.stdout.on('data', (data) => {
+            const output = data.toString().trim();
+            if (output) {
+              // Check if server started successfully
+              if ((output.includes('started') || output.includes('listening') || output.includes(`127.0.0.1:${webPort}`)) && !startupComplete && !hasPortError) {
+                startupComplete = true;
+                clearTimeout(startupTimeout);
+                emit(progress, { stage: 'serve', message: `✅ Laravel server started successfully on port ${webPort}`, activity: 'laravel' });
+                addActivityLog('laravel', `Laravel server started successfully on port ${webPort}`, 'success', progress);
+                console.log(`[Laravel] Server started successfully on port ${webPort}`);
+              } else if (!startupComplete) {
+                // Only log other output if startup not yet complete
+                emit(progress, { stage: 'serve', message: output, activity: 'laravel' });
+                addActivityLog('laravel', output, 'info', progress);
+                console.log(`[Laravel] ${output}`);
+              }
+            }
+          });
+        }
+        
+        if (!useCmdWindow && serveProc.stderr) {
+          serveProc.stderr.on('data', (data) => {
+            const output = data.toString().trim();
+            if (output) {
+              // Check for specific port binding errors
+              if (output.includes('Failed to listen') || output.includes('Address already in use') || output.includes('bind')) {
+                hasPortError = true;
+                clearTimeout(startupTimeout);
+                emit(progress, { stage: 'serve', message: `❌ Port binding error: ${output}`, activity: 'laravel' });
+                addActivityLog('laravel', `Port binding error: ${output}`, 'error', progress);
+                console.log(`[Laravel Port Error] ${output}`);
+              } else if (!startupComplete && !hasPortError) {
+                // Only log warnings if startup not complete and no port error
+                emit(progress, { stage: 'serve', message: `Laravel: ${output}`, activity: 'laravel' });
+                addActivityLog('laravel', output, 'warning', progress);
+                console.log(`[Laravel Warning] ${output}`);
+              }
+            }
+          });
+        }
+        
+        // Test server availability with HTTP request
+        const testServerAvailability = async (retryCount = 0) => {
+          const maxRetries = 12; // 12 retries = 60 seconds total (5s intervals)
+          
+          return new Promise((resolve) => {
+            const req = http.request({
+              hostname: '127.0.0.1',
+              port: webPort,
+              path: '/',
+              method: 'GET',
+              timeout: 3000
+            }, (res) => {
+              clearTimeout(startupTimeout);
+              if (!startupComplete && !hasPortError) {
+                startupComplete = true;
+                emit(progress, { stage: 'serve', message: `✅ Laravel server is running in CMD window on port ${webPort}`, activity: 'laravel' });
+                addActivityLog('laravel', `Laravel server confirmed running on port ${webPort}`, 'success', progress);
+                console.log(`[Laravel] Server confirmed running on port ${webPort}`);
+              } else {
+                emit(progress, { stage: 'serve', message: `Laravel server process running but not yet responsive on port ${webPort}`, activity: 'laravel' });
+                addActivityLog('laravel', `Laravel server process running but not yet responsive on port ${webPort}`, 'warning', progress);
+                console.log(`[Laravel] Server process running but not responsive, PID: ${processes.laravel.pid}`);
+              }
+              resolve(true);
+            });
+            
+            req.on('error', async (error) => {
+              if (retryCount < maxRetries && !hasPortError) {
+                // Retry after 5 seconds
+                setTimeout(() => {
+                  testServerAvailability(retryCount + 1).then(resolve);
+                }, 5000);
+              } else if (!hasPortError) {
+                hasPortError = true;
+                clearTimeout(startupTimeout);
+                emit(progress, { stage: 'serve', message: `❌ Laravel server CMD window opened but server not responding on port ${webPort}`, activity: 'laravel' });
+                addActivityLog('laravel', `Laravel server not responding on port ${webPort} after ${maxRetries * 5} seconds`, 'error', progress);
+                console.log(`[Laravel Port Error] Server not responding on port ${webPort}`);
+                
+                // Try to restart with different port if this is not the last attempt
+                if (attempt < maxAttempts) {
+                  setTimeout(async () => {
+                    try {
+                      // Kill the process (CMD or PHP)
+                      if (serveProc && serveProc.pid) {
+                        treeKill(serveProc.pid);
+                      }
+                      
+                      // Clean up batch file if using CMD approach
+                      if (useCmdWindow) {
+                        try {
+                          const batchFile = path.join(appRoot, 'start-laravel-server.bat');
+                          await fse.remove(batchFile);
+                        } catch (cleanupError) {
+                          console.log(`[Laravel] Warning: Could not remove batch file: ${cleanupError.message}`);
+                        }
+                      }
+                      
+                      // Try next available port
+                      const nextPort = webPort + attempt;
+                      if (await isPortFree(nextPort)) {
+                        webPort = nextPort;
+                        emit(progress, { stage: 'serve', message: `Retrying with port ${webPort}...`, activity: 'laravel' });
+                        await writeEnvValue(appRoot, 'APP_URL', `http://localhost:${webPort}`);
+                        emit(progress, { 
+                          stage: 'port-update', 
+                          type: 'port-update',
+                          webPort: webPort,
+                          pgPort: pgPort,
+                          message: `Web port updated to ${webPort}` 
+                        });
+                        await startLaravelServer(attempt + 1);
+                      }
+                    } catch (retryError) {
+                      console.log(`[Laravel Retry Error] ${retryError.message}`);
+                    }
+                  }, 2000);
+                }
+                resolve(false);
+              } else {
+                resolve(false);
+              }
+            });
+            
+            req.on('timeout', () => {
+              req.destroy();
+            });
+            
+            req.end();
+          });
+        };
+        
+        // Start server availability testing after an initial delay
+        setTimeout(() => {
+          if (!startupComplete && !hasPortError) {
+            testServerAvailability();
+          }
+        }, useCmdWindow ? 7000 : 3000); // Allow more time if using CMD window
+        
+        return serveProc;
+        
+      } catch (error) {
+        emit(progress, { stage: 'serve', message: `Failed to start Laravel server (attempt ${attempt}): ${error.message}`, activity: 'laravel' });
+        addActivityLog('laravel', `Failed to start Laravel server (attempt ${attempt}): ${error.message}`, 'error', progress);
+        console.log(`[Laravel Start Error] Attempt ${attempt}: ${error.message}`);
+        
+        if (attempt < 5) {
+          emit(progress, { stage: 'serve', message: `Retrying in 3 seconds...`, activity: 'laravel' });
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          return await startLaravelServer(attempt + 1);
+        }
+        
+        throw error;
       }
-    });
+    };
     
-    processes.laravel = serveProc;
+    try {
+      serveProc = await startLaravelServer(1);
+      processes.laravel = serveProc;
+      processes.laravelBatchFile = path.join(appRoot, 'start-laravel-server.bat'); // Store batch file path
+    } catch (startError) {
+      emit(progress, { stage: 'serve', message: `All attempts to start Laravel server failed: ${startError.message}`, activity: 'laravel' });
+      addActivityLog('laravel', `All attempts to start Laravel server failed: ${startError.message}`, 'error', progress);
+      console.log(`[Laravel Fatal Error] ${startError.message}`);
+      processes.laravel = null;
+      // Don't throw here, continue with other services
+    }
     
-    // Give Laravel a moment to start up, then start scheduler
+    if (processes.laravel && serveProc) {
+      serveProc.on('close', (code) => {
+        const msg = `Laravel server exited with code ${code}`;
+        emit(progress, { stage: 'serve', message: msg, activity: 'laravel' });
+        addActivityLog('laravel', msg, 'warning', progress);
+        console.log(`[Laravel] ${msg}`);
+        
+        // If this process is just a CMD launcher handle, don't attempt to auto-restart here
+        if (serveProc.isCmdWindow) {
+          console.log('[Laravel] CMD launcher process closed; not auto-restarting here. The real server runs in the CMD window.');
+          return;
+        }
+
+        // Try to restart Laravel server if it exits unexpectedly (not manually stopped)
+        if (processes.laravel && !processes.laravel.manuallyStoppedLaravel) {
+          console.log('[Laravel] Attempting to restart server after unexpected exit...');
+          setTimeout(async () => {
+            if (processes.laravel && !processes.laravel.manuallyStoppedLaravel) {
+              // Restart Laravel server
+              try {
+                emit(progress, { stage: 'serve', message: 'Attempting to restart Laravel server...', activity: 'laravel' });
+                addActivityLog('laravel', 'Attempting to restart Laravel server...', 'info', progress);
+                
+                const restartProc = await startLaravelServer(1);
+                if (restartProc) {
+                  processes.laravel = restartProc;
+                  processes.laravelBatchFile = path.join(appRoot, 'start-laravel-server.bat'); // Update batch file path
+                  emit(progress, { stage: 'serve', message: 'Laravel server CMD window restarted successfully', activity: 'laravel' });
+                  addActivityLog('laravel', 'Laravel server CMD window restarted successfully', 'success', progress);
+                  console.log('[Laravel] Server CMD window restarted successfully');
+                } else {
+                  throw new Error('Failed to create restart process');
+                }
+              } catch (restartError) {
+                emit(progress, { stage: 'serve', message: `Failed to restart Laravel server: ${restartError.message}`, activity: 'laravel' });
+                addActivityLog('laravel', `Failed to restart Laravel server: ${restartError.message}`, 'error', progress);
+                console.log(`[Laravel] Restart failed: ${restartError.message}`);
+                processes.laravel = null;
+              }
+            }
+          }, 5000); // Wait 5 seconds before restart attempt
+        } else {
+          processes.laravel = null;
+          
+          // Stop scheduler when Laravel stops manually
+          if (processes.scheduler && processes.scheduler.interval) {
+            clearInterval(processes.scheduler.interval);
+            processes.scheduler = null;
+            emit(progress, { stage: 'scheduler', message: 'Scheduler stopped (Laravel server stopped)', activity: 'scheduler' });
+            addActivityLog('scheduler', 'Scheduler stopped (Laravel server stopped)', 'warning', progress);
+            console.log('[Scheduler] Stopped due to Laravel server exit');
+          }
+          
+          // Stop pending transactions checker when Laravel stops manually
+          if (processes.pendingTransactions && processes.pendingTransactions.interval) {
+            clearInterval(processes.pendingTransactions.interval);
+            processes.pendingTransactions = null;
+            emit(progress, { stage: 'pending-transactions', message: 'Pending transactions checker stopped (Laravel server stopped)', activity: 'pendingTransactions' });
+            addActivityLog('pendingTransactions', 'Pending transactions checker stopped (Laravel server stopped)', 'warning', progress);
+            console.log('[Pending Transactions] Stopped due to Laravel server exit');
+          }
+        }
+      });
+      
+      serveProc.on('error', (err) => {
+        const msg = `Laravel server error: ${err.message}`;
+        emit(progress, { stage: 'serve', message: msg, activity: 'laravel' });
+        addActivityLog('laravel', msg, 'error', progress);
+        console.log(`[Laravel] ${msg}`);
+        
+        // Don't restart on error events, as these are usually startup failures
+        processes.laravel = null;
+        
+        // Stop scheduler when Laravel errors
+        if (processes.scheduler && processes.scheduler.interval) {
+          clearInterval(processes.scheduler.interval);
+          processes.scheduler = null;
+          emit(progress, { stage: 'scheduler', message: 'Scheduler stopped (Laravel server error)', activity: 'scheduler' });
+          addActivityLog('scheduler', 'Scheduler stopped (Laravel server error)', 'error', progress);
+          console.log('[Scheduler] Stopped due to Laravel server error');
+        }
+        
+        // Stop pending transactions checker when Laravel errors
+        if (processes.pendingTransactions && processes.pendingTransactions.interval) {
+          clearInterval(processes.pendingTransactions.interval);
+          processes.pendingTransactions = null;
+          emit(progress, { stage: 'pending-transactions', message: 'Pending transactions checker stopped (Laravel server error)', activity: 'pendingTransactions' });
+          addActivityLog('pendingTransactions', 'Pending transactions checker stopped (Laravel server error)', 'error', progress);
+          console.log('[Pending Transactions] Stopped due to Laravel server error');
+        }
+      });
+    }
+    
+    // Give Laravel a moment to start up, then start both scheduler and pending transactions checker
     setTimeout(async () => {
-      emit(progress, { stage: 'serve', message: `Laravel server running silently in background on http://127.0.0.1:${webPort}` });
-      console.log(`[Laravel] Server running silently at http://127.0.0.1:${webPort}`);
+      // Check if Laravel server is actually running
+      const laravelRunning = processes.laravel && !processes.laravel.killed && processes.laravel.pid;
       
-      // Start the scheduler after Laravel is ready
+      if (laravelRunning) {
+        // Verify server is responsive
+        try {
+          // Simple HTTP test using Node.js http module
+          const testServer = () => {
+            return new Promise((resolve, reject) => {
+              const request = http.request({
+                hostname: '127.0.0.1',
+                port: webPort,
+                method: 'GET',
+                path: '/',
+                timeout: 3000
+              }, (response) => {
+                resolve(response.statusCode < 500); // Accept any non-server-error response
+              });
+              
+              request.on('error', (error) => {
+                resolve(false); // Server not responsive
+              });
+              
+              request.on('timeout', () => {
+                request.destroy();
+                resolve(false);
+              });
+              
+              request.end();
+            });
+          };
+          
+          const isResponsive = await testServer();
+          
+          if (isResponsive) {
+            emit(progress, { stage: 'serve', message: `Laravel server confirmed running and responsive on http://127.0.0.1:${webPort}`, activity: 'laravel' });
+            addActivityLog('laravel', `Laravel server confirmed running and responsive on http://127.0.0.1:${webPort}`, 'success', progress);
+            console.log(`[Laravel] Server confirmed running and responsive at http://127.0.0.1:${webPort}, PID: ${processes.laravel.pid}`);
+          } else {
+            emit(progress, { stage: 'serve', message: `Laravel server process running but not yet responsive on port ${webPort}`, activity: 'laravel' });
+            addActivityLog('laravel', `Laravel server process running but not yet responsive on port ${webPort}`, 'warning', progress);
+            console.log(`[Laravel] Server process running but not responsive, PID: ${processes.laravel.pid}`);
+          }
+        } catch (testError) {
+          emit(progress, { stage: 'serve', message: `Laravel server running, response test failed: ${testError.message}`, activity: 'laravel' });
+          addActivityLog('laravel', `Laravel server running, response test failed: ${testError.message}`, 'warning', progress);
+          console.log(`[Laravel] Server running but response test failed: ${testError.message}`);
+        }
+      } else {
+        emit(progress, { stage: 'serve', message: 'Laravel server process not detected or may have failed to start', activity: 'laravel' });
+        addActivityLog('laravel', 'Laravel server process not detected or may have failed to start', 'warning', progress);
+        console.log('[Laravel] Server process not running properly');
+      }
+      
+      // Always try to start scheduler and pending transactions checker, even if Laravel might have issues
+      // Start the scheduler after Laravel startup attempt, with more robust process management
       try {
         await startScheduler(phpExe, appRoot, env, progress);
       } catch (error) {
-        emit(progress, { stage: 'scheduler', message: `Failed to start scheduler: ${error.message}` });
+        emit(progress, { stage: 'scheduler', message: `Failed to start scheduler: ${error.message}`, activity: 'scheduler' });
+        addActivityLog('scheduler', `Failed to start scheduler: ${error.message}`, 'error', progress);
         console.log(`[Scheduler] Failed to start: ${error.message}`);
       }
-    }, 2000);
+      
+      // Start the separate pending transactions checker after Laravel startup attempt
+      try {
+        await startPendingTransactionsChecker(phpExe, appRoot, env, progress);
+      } catch (error) {
+        emit(progress, { stage: 'pending-transactions', message: `Failed to start pending transactions checker: ${error.message}`, activity: 'pendingTransactions' });
+        addActivityLog('pendingTransactions', `Failed to start pending transactions checker: ${error.message}`, 'error', progress);
+        console.log(`[Pending Transactions] Failed to start: ${error.message}`);
+      }
+    }, 5000); // Increased delay to allow Laravel to properly start
   }
   const appUrl = `http://localhost:${webPort}`;
   emit(progress, { stage: 'done', message: `Services started. PostgreSQL on port ${pgPort}, Laravel server running silently on port ${webPort}, Scheduler showing output every minute.` });
@@ -1966,16 +2586,61 @@ async function stop(options = {}) {
   }
   processes.scheduler = null;
 
-  // Stop Laravel serve (tracked)
+  // Stop pending transactions checker (if running)
+  try {
+    if (processes.pendingTransactions && processes.pendingTransactions.interval) {
+      console.log('Stopping pending transactions checker...');
+      clearInterval(processes.pendingTransactions.interval);
+    }
+  } catch (e) {
+    console.log(`Error stopping pending transactions checker: ${e.message}`);
+  }
+  processes.pendingTransactions = null;
+
+  // Stop Laravel serve (CMD window)
   try {
     if (processes.laravel && processes.laravel.pid) {
-      console.log(`Stopping Laravel server process (PID: ${processes.laravel.pid})`);
+      console.log(`Stopping Laravel server CMD window (PID: ${processes.laravel.pid})`);
+      // Mark as manually stopped to prevent automatic restart
+      if (processes.laravel) processes.laravel.manuallyStoppedLaravel = true;
+      
+      // Kill the entire process tree (including CMD windows)
       treeKill(processes.laravel.pid);
+      
+      // Also try to kill any Laravel artisan serve processes directly
+      try {
+        if (process.platform === 'win32') {
+          console.log('Killing Laravel artisan serve processes...');
+          await runCommand('taskkill', ['/F', '/T', '/FI', 'WINDOWTITLE eq Yualan Laravel Server*'], { env, stage: 'laravel', logPrefix: 'taskkill laravel cmd', quiet: true });
+          // Additional safety: close any cmd windows running start-laravel-server.bat
+          await runCommand('taskkill', ['/F', '/T', '/IM', 'cmd.exe'], { env, stage: 'laravel', logPrefix: 'taskkill any cmd', quiet: true });
+        }
+      } catch (killError) {
+        console.log(`Note: Could not kill Laravel CMD windows by title: ${killError.message}`);
+      }
     }
+    
+    // Clean up the batch file
+    if (processes.laravelBatchFile) {
+      try {
+        console.log(`Cleaning up Laravel batch file: ${processes.laravelBatchFile}`);
+        await fse.remove(processes.laravelBatchFile);
+        // Also remove the log file to avoid growth
+        try {
+          const logsDir = path.join(appRoot, 'storage', 'logs');
+          const logFile = path.join(logsDir, 'laravel-serve-cmd.log');
+          if (fs.existsSync(logFile)) await fse.remove(logFile);
+        } catch(_) {}
+      } catch (cleanupError) {
+        console.log(`Warning: Could not remove Laravel batch file: ${cleanupError.message}`);
+      }
+    }
+    
   } catch (e) {
     console.log(`Error stopping Laravel process: ${e.message}`);
   }
   processes.laravel = null;
+  processes.laravelBatchFile = null;
 
   // Stop Postgres
   try {
@@ -2001,139 +2666,6 @@ async function stop(options = {}) {
   // Aggressively kill all postgres.exe processes system-wide
   try {
     if (process.platform === 'win32') {
-      console.log('Killing all postgres.exe processes...');
-      await runCommand('taskkill', ['/F', '/T', '/IM', 'postgres.exe'], { env, stage: 'postgres', logPrefix: 'taskkill postgres', quiet: true });
-    } else {
-      console.log('Killing all postgres processes...');
-      await runCommand('pkill', ['-f', 'postgres'], { env, stage: 'postgres', logPrefix: 'pkill postgres', quiet: true });
-    }
-  } catch (_) {}
-
-  // Kill any php artisan serve processes system-wide
-  try {
-    if (process.platform === 'win32') {
-      console.log('Killing all php artisan serve processes...');
-      const ps = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*artisan serve*' -or $_.CommandLine -like '*php*artisan*serve*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }";
-      await runCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { env, stage: 'serve', logPrefix: 'kill artisan serve', quiet: true });
-    } else {
-      console.log('Killing all artisan serve processes...');
-      await runCommand('pkill', ['-f', 'artisan serve'], { env, stage: 'serve', logPrefix: 'pkill artisan serve', quiet: true });
-    }
-  } catch (_) {}
-  
-  console.log('All services stopped.');
-  return { ok: true };
-}
-
-async function resetDb(options = {}, progress) {
-  emit(progress, { stage: 'postgres', message: 'Resetting PostgreSQL data directory...' });
-  const installDir = options.installDir;
-  if (!installDir) throw new Error('installDir is required');
-  const stackDir = path.join(installDir, 'stack');
-  const pgDir = path.join(stackDir, 'postgres');
-  const roots = await resolveRoots({ phpDir: path.join(stackDir, 'php'), apacheDir: path.join(stackDir, 'apache'), nodeDir: path.join(stackDir, 'node'), pgDir });
-  const env = makeEnvFromRoots(process.env, roots);
-  const port = options.pgPort || 5432;
-  const pgDataDir = path.join(roots.pgRoot || pgDir, 'data');
-
-  // Stop if running
-  try {
-    const pgCtl = await findBinary(path.join(roots.pgRoot || pgDir, 'bin'), ['pg_ctl.exe', 'pg_ctl']);
-    if (pgCtl) await runCommand(pgCtl, ['stop', '-D', pgDataDir, '-m', 'fast', '-t', '60'], { env, stage: 'postgres', logPrefix: 'pg_ctl stop' });
-  } catch (_) {}
-
-  await fse.remove(pgDataDir).catch(() => {});
-  await fse.ensureDir(pgDataDir);
-  await runInitdb(roots.pgRoot || pgDir, pgDataDir, env, progress);
-  await writePgHba(pgDataDir, progress);
-
-  // Start & wait
-  const pgCtl2 = await findBinary(path.join(roots.pgRoot || pgDir, 'bin'), ['pg_ctl.exe', 'pg_ctl']);
-  await fse.ensureDir(path.join(roots.pgRoot || pgDir, 'logs'));
-  const serverLog = path.join(roots.pgRoot || pgDir, 'logs', 'server.log');
-  const startArgs = ['start', '-w', '-t', '60', '-D', pgDataDir, '-l', serverLog, '-o', `-c port=${port} -c listen_addresses=127.0.0.1`];
-  await runCommand(pgCtl2, startArgs, { env, progress, stage: 'postgres', logPrefix: 'pg_ctl start', timeoutMs: 70000, quiet: true });
-  const ok = await waitForPostgres(roots.pgRoot || pgDir, port, env, progress, { retries: 90, delayMs: 1000 });
-  if (!ok) {
-    const logs = await readBestPgLogs(pgDataDir, path.dirname(serverLog));
-    emit(progress, { stage: 'postgres', log: `PostgreSQL did not become ready after reset. Logs:\n${logs}` });
-    throw new Error('PostgreSQL not ready after reset');
-  }
-
-  // Recreate role/db/privs
-  const dbUser = options.pgUser || 'yualan';
-  const dbPass = options.pgPassword || 'yualan';
-  const dbName = options.pgDatabase || 'yualan';
-  await ensureRoleDb(roots.pgRoot || pgDir, port, { user: dbUser, password: dbPass, database: dbName }, env, progress);
-  await ensureDbPrivileges(roots.pgRoot || pgDir, port, { user: dbUser, database: dbName }, env, progress);
-  emit(progress, { stage: 'postgres', message: 'Database reset complete.' });
-  return { ok: true };
-}
-
-// Check if an installation directory contains valid installation components
-async function checkExistingInstallation(installDir) {
-  try {
-    // Check for essential stack components
-    const stackPath = path.join(installDir, 'stack');
-    const phpPath = path.join(stackPath, 'php');
-    const nodePath = path.join(stackPath, 'node');
-    const pgPath = path.join(stackPath, 'pgsql');
-    
-    // Check if stack directory and core components exist
-    const hasStack = await fse.pathExists(stackPath);
-    const hasPhp = await fse.pathExists(phpPath);
-    const hasNode = await fse.pathExists(nodePath);
-    const hasPg = await fse.pathExists(pgPath);
-    
-    // Check for app directory
-    const appPath = path.join(installDir, 'app');
-    const hasApp = await fse.pathExists(appPath);
-    
-    // Check for .env file in app directory
-    let hasEnv = false;
-    if (hasApp) {
-      try {
-        const appRoot = await resolveAppRoot(appPath);
-        const envFile = path.join(appRoot, '.env');
-        hasEnv = await fse.pathExists(envFile);
-      } catch (_) {}
-    }
-    
-    // Consider installation valid if it has:
-    // 1. Stack components (PHP, Node, PostgreSQL) - indicates server setup completed
-    // 2. App directory with .env - indicates app installation completed
-    const hasServerStack = hasStack && (hasPhp || hasNode || hasPg);
-    const hasAppInstallation = hasApp && hasEnv;
-    
-    return {
-      hasValidInstallation: hasServerStack && hasAppInstallation,
-      hasServerStack,
-      hasAppInstallation,
-      components: {
-        stack: hasStack,
-        php: hasPhp,
-        node: hasNode,
-        postgresql: hasPg,
-        app: hasApp,
-        env: hasEnv
-      }
-    };
-  } catch (err) {
-    return {
-      hasValidInstallation: false,
-      hasServerStack: false,
-      hasAppInstallation: false,
-      components: {}
-    };
-  }
-}
-
-async function cleanupPorts() {
-  console.log('Force cleanup: Killing all Laravel serve and PostgreSQL processes...');
-  
-  try {
-    if (process.platform === 'win32') {
-      // Kill all postgres.exe processes
       console.log('Killing all postgres.exe processes...');
       await runCommand('taskkill', ['/F', '/T', '/IM', 'postgres.exe'], { quiet: true });
       
@@ -2174,13 +2706,32 @@ async function cleanupPorts() {
   if (processes.scheduler && processes.scheduler.interval) {
     clearInterval(processes.scheduler.interval);
   }
+  if (processes.pendingTransactions && processes.pendingTransactions.interval) {
+    clearInterval(processes.pendingTransactions.interval);
+  }
   processes.postgres = null;
   processes.laravel = null;
   processes.queue = null;
   processes.scheduler = null;
+  processes.pendingTransactions = null;
   
   console.log('Force cleanup completed.');
   return { ok: true };
+}
+
+// Get activity logs for UI
+function getActivityLogs(activity = null) {
+  if (activity && processes.activityLogs[activity]) {
+    return processes.activityLogs[activity];
+  }
+  return processes.activityLogs;
+}
+
+// Clear activity logs for a specific activity
+function clearActivityLogs(activity) {
+  if (processes.activityLogs[activity]) {
+    processes.activityLogs[activity] = [];
+  }
 }
 
 module.exports = {
@@ -2190,6 +2741,8 @@ module.exports = {
   startServices,
   readExistingEnv,
   checkExistingInstallation,
+  getActivityLogs,
+  clearActivityLogs,
   // Backward-compatible exports
   install,
   start,

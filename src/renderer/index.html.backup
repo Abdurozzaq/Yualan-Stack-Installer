@@ -201,38 +201,16 @@
         scrollbar-color: var(--text-muted) transparent;
       }
       
-      .activity-mini-log::-webkit-scrollbar {
-        width: 6px;
-      }
-      
-      .activity-mini-log::-webkit-scrollbar-track {
-        background: rgba(15, 23, 42, 0.5);
-        border-radius: 3px;
-      }
-      
-      .activity-mini-log::-webkit-scrollbar-thumb {
-        background: rgba(148, 163, 184, 0.5);
-        border-radius: 3px;
-      }
-      
-      .activity-mini-log::-webkit-scrollbar-thumb:hover {
-        background: rgba(148, 163, 184, 0.8);
-      }
-      
       .activity-stats {
         font-size: 10px;
         color: var(--text-muted);
-        margin-top: 8px;
+        margin-top: 6px;
         display: flex;
         justify-content: space-between;
         align-items: center;
         flex-shrink: 0;
-        padding: 8px 12px;
-        padding-top: 8px;
+        padding-top: 6px;
         border-top: 1px solid var(--light-border);
-        background: linear-gradient(135deg, var(--light-surface) 0%, #f8fafc 100%);
-        margin: 0 -12px -10px -12px;
-        border-radius: 0 0 12px 12px;
       }
       
       /* Activity Detail Modal */
@@ -950,7 +928,7 @@
           <!-- Full Activity Card -->
           <div class="activity-card full-activity" id="full-activity-card">
             <div class="activity-card-header full" data-activity="full">
-              <span>ðŸ“‹ Activity Log</span>
+              <span>í³‹ Activity Log</span>
               <div class="activity-status stopped" id="full-activity-status"></div>
             </div>
             <div class="activity-card-content">
@@ -1099,7 +1077,7 @@
         const modal = document.getElementById('activity-modal');
         const title = document.getElementById('activity-modal-title');
         
-        title.innerHTML = `<span>ï¿½ï¿½ï¿½ Activity Log</span>`;
+        title.innerHTML = `<span>í³‹ Activity Log</span>`;
         modal.classList.add('active');
         updateActivityModal('full');
       };
